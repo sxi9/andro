@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Android Sentinel</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2 4 5v6c0 5 3.4 8.4 8 11 4.6-2.6 8-6 8-11V5l-8-3Z"/><path d="m9 12 2 2 4-4"/></svg>
+      <div><b>Android Sentinel</b><span>device monitor</span></div>
+    </div>
+    <div class="demobadge" id="demobadge">DEMO MODE — simulated device</div>
+
+    <div class="device">
+      <div class="row"><span class="name" id="devname">waiting for device…</span>
+        <span class="pill" id="devroot"></span></div>
+      <div class="meta" id="devmeta">adb not attached</div>
+    </div>
+
+    <div class="navlabel">Monitor</div>
+    <nav class="nav" data-nav>
+      <button class="on" data-tab="monitor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>Live Activity</button>
+      <button data-tab="network"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>Network &amp; Data</button>
+      <button data-tab="privacy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>Mic · Cam · Location</button>
+      <button data-tab="apps"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Apps &amp; Permissions</button>
+      <button data-tab="logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h16v16H4z"/><path d="M8 9h4M8 13h8M8 17h6"/></svg>Logcat</button>
+      <button data-tab="radio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 15.8a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/><path d="M12 19V9"/></svg>Cellular &amp; Radio</button>
+    </nav>
+    <div class="navlabel">Defense</div>
+    <nav class="nav" data-nav>
+      <button data-tab="alerts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 0-6 6c0 5-2 6-2 6h16s-2-1-2-6a6 6 0 0 0-6-6Z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>Alerts &amp; Rules<span class="badge" id="abadge"></span></button>
+    </nav>
+    <div class="railfoot">All data stays on this machine.<br>Own-device monitoring only.</div>
+  </aside>
+
+  <div class="main">
+    <div class="mtabs" data-nav>
+      <button class="on" data-tab="monitor">Live</button>
+      <button data-tab="network">Network</button>
+      <button data-tab="privacy">Privacy</button>
+      <button data-tab="apps">Apps</button>
+      <button data-tab="logs">Logcat</button>
+      <button data-tab="radio">Cellular</button>
+      <button data-tab="alerts">Alerts</button>
+    </div>
+
+    <div class="topbar">
+      <div><h2 id="ttl">Live Activity</h2><div class="sub" id="sub">Unified timeline of everything the device is doing</div></div>
+      <div class="live off" id="wsstate"><span class="dot"></span><span id="wstext">CONNECTING</span></div>
+      <button class="iconbtn" id="theme" title="Toggle theme" aria-label="Toggle theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19"/></svg>
+      </button>
+    </div>
+
+    <div class="scroll">
+      <!-- MONITOR -->
+      <section class="panel on" data-panel="monitor">
+        <div class="grid tiles">
+          <div class="card tile"><div class="k">Open alerts</div><div class="v tnum" id="t-alerts">0</div><div class="d">needs review</div></div>
+          <div class="card tile"><div class="k">Mic / cam now</div><div class="v tnum" id="t-sensors">—</div><div class="d" id="t-sensors-d">idle</div></div>
+          <div class="card tile"><div class="k">Live connections</div><div class="v tnum" id="t-conns">0</div><div class="d" id="t-transport">—</div></div>
+          <div class="card tile"><div class="k">Hostnames cached</div><div class="v tnum" id="t-hosts">0</div><div class="d" id="t-capture">capture off</div></div>
+          <div class="card tile"><div class="k">God-mode apps</div><div class="v tnum" id="t-god">0</div><div class="d">a11y · admin · notif</div></div>
+        </div>
+        <div class="cols" style="margin-top:14px">
+          <div class="card pad0">
+            <div class="ch"><h3>Unified activity feed</h3><span class="hint">sensors · network · apps · threats</span></div>
+            <div class="feed" id="feed-mon"><div class="empty">waiting for events…</div></div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:14px">
+            <div class="card pad0">
+              <div class="ch"><h3>Right now</h3><span class="hint">active access</span></div>
+              <div id="nowlist"><div class="empty">nothing active</div></div>
+            </div>
+            <div class="card pad0">
+              <div class="ch"><h3>Recent alerts</h3></div>
+              <div id="monalerts"><div class="empty">no open alerts</div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- NETWORK -->
+      <section class="panel" data-panel="network">
+        <div class="card pad0">
+          <div class="ch"><h3>Where your data is going</h3>
+            <div class="seg" id="transportseg">
+              <button class="on" data-tr="all">all</button><button data-tr="wifi">wifi</button>
+              <button data-tr="cellular">cellular</button><button data-tr="vpn">vpn</button>
+            </div>
+            <span class="hint">hostnames from DNS + TLS SNI — no decryption</span></div>
+          <div class="flow"><svg id="flowsvg" viewBox="0 0 900 300" preserveAspectRatio="xMidYMid meet"></svg></div>
+          <div class="legend">
+            <span><i style="background:var(--accent)"></i>destination</span>
+            <span><i style="background:var(--info)"></i>tracker / ads</span>
+            <span><i style="background:var(--crit)"></i>alerted</span>
+          </div>
+        </div>
+        <div class="cols" style="margin-top:14px">
+          <div class="card pad0">
+            <div class="ch"><h3>Live connections</h3><span class="hint">socket → UID → app</span></div>
+            <div class="feed" id="feed-net"><div class="empty">no connections yet</div></div>
+          </div>
+          <div class="card pad0">
+            <div class="ch"><h3>Egress by app</h3><span class="hint" id="egresshint">wifi + cellular</span></div>
+            <div id="egress" style="padding:6px 0"><div class="empty">waiting for netstats…</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PRIVACY -->
+      <section class="panel" data-panel="privacy">
+        <div class="cols3" id="sensorcards"></div>
+        <div class="card pad0" style="margin-top:14px">
+          <div class="ch"><h3>Sensor access timeline</h3><span class="hint">background access is flagged</span></div>
+          <div class="feed" id="feed-priv" style="max-height:480px"><div class="empty">no sensor access yet</div></div>
+        </div>
+      </section>
+
+      <!-- APPS -->
+      <section class="panel" data-panel="apps">
+        <div class="grid tiles">
+          <div class="card tile"><div class="k">Third-party apps</div><div class="v tnum" id="t-apps">0</div><div class="d">monitored</div></div>
+          <div class="card tile"><div class="k">God-mode holders</div><div class="v tnum" id="t-god2">0</div><div class="d">review these first</div></div>
+          <div class="card tile"><div class="k">Sideloaded</div><div class="v tnum" id="t-side">0</div><div class="d">not from Play</div></div>
+        </div>
+        <div class="card pad0" style="margin-top:14px">
+          <div class="ch"><h3>Installed apps</h3><span class="hint">sorted by risk, then egress</span></div>
+          <div class="applist" id="applist"><div class="empty">inventory loads on first package poll…</div></div>
+        </div>
+      </section>
+
+      <!-- LOGS -->
+      <section class="panel" data-panel="logs">
+        <div class="card pad0">
+          <div class="logtools">
+            <div class="seg" id="lvlseg">
+              <button class="on" data-lvl="all">all</button><button data-lvl="E">E</button>
+              <button data-lvl="W">W</button><button data-lvl="I">I</button>
+            </div>
+            <input id="logsearch" placeholder="filter by tag, package or text…" autocomplete="off">
+            <span class="hint">V/D suppressed at source</span>
+          </div>
+          <div class="logview" id="logview"></div>
+        </div>
+      </section>
+
+      <!-- CELLULAR & RADIO -->
+      <section class="panel" data-panel="radio">
+        <div class="cols3">
+          <div class="card">
+            <div class="ch" style="padding:0 0 10px;border:0"><h3>Connection</h3></div>
+            <dl class="kv">
+              <dt>Network type</dt><dd id="r-nt">—</dd>
+              <dt>Operator</dt><dd id="r-op">—</dd>
+              <dt>Call state</dt><dd id="r-call">—</dd>
+              <dt>Transport in use</dt><dd id="r-tr">—</dd>
+            </dl>
+          </div>
+          <div class="card">
+            <div class="ch" style="padding:0 0 10px;border:0"><h3>Serving cell</h3></div>
+            <dl class="kv">
+              <dt>Cell ID</dt><dd id="r-ci">—</dd>
+              <dt>TAC / LAC</dt><dd id="r-tac">—</dd>
+              <dt>Last change</dt><dd id="r-change">—</dd>
+            </dl>
+            <div class="note" style="margin-top:12px">A downgrade to 2G, or the cell changing while you are stationary, raises an alert.</div>
+          </div>
+          <div class="card">
+            <div class="ch" style="padding:0 0 10px;border:0"><h3>Mobile data by app</h3></div>
+            <div id="mobiledata"><div class="empty">waiting for netstats…</div></div>
+          </div>
+        </div>
+        <div class="card pad0" style="margin-top:14px">
+          <div class="ch"><h3>Radio log</h3><span class="hint">logcat -b radio</span></div>
+          <div class="logview" id="radiolog" style="max-height:340px"></div>
+        </div>
+      </section>
+
+      <!-- ALERTS -->
+      <section class="panel" data-panel="alerts">
+        <div class="cols">
+          <div class="card pad0">
+            <div class="ch"><h3>Triggered alerts</h3><span class="hint">newest first</span></div>
+            <div id="alertlist"><div class="empty">no open alerts</div></div>
+          </div>
+          <div class="card pad0">
+            <div class="ch"><h3>Detection rules</h3><span class="hint">toggle on / off</span></div>
+            <div id="rulelist"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

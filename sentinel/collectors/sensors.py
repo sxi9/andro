@@ -67,7 +67,10 @@ class SensorsCollector(Collector):
         # ---- appops accesses ----
         text = await self._dump_appops()
         accesses = parse_appops(text, ops=set(WATCHED_OPS))
-        if self.ctx.maps and not self._pkg2uid:
+        if self.ctx.maps:
+            # rebuilt each poll from the cached map (pure dict work) so newly
+            # installed apps attribute correctly; the device watcher refreshes
+            # the underlying map off the event loop
             self._pkg2uid = {p: u for u, p in self.ctx.maps.all_packages().items()}
         fresh_cut = _FRESH_WINDOW if self._first_poll else self.ctx.cfg.poll_sensors * 4
         for a in accesses:

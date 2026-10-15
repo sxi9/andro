@@ -72,22 +72,20 @@ class RadioCollector(Collector):
         assert adb is not None
         backoff = 2.0
         while True:
+            started = time.time()
             try:
                 proc = adb.popen_lines("logcat -b radio -v threadtime -T 1")
+                try:
+                    await asyncio.to_thread(self._pump, proc)
+                finally:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
             except Exception as e:
                 self.log.warning("radio logcat failed: %s", e)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
-                continue
-            backoff = 2.0
-            try:
-                await asyncio.to_thread(self._pump, proc)
-            finally:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            await asyncio.sleep(2.0)
+            backoff = 2.0 if time.time() - started > 30 else min(backoff * 2, 60)
+            await asyncio.sleep(backoff)
 
     def _pump(self, proc) -> None:
         assert proc.stdout is not None

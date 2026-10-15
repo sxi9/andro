@@ -64,7 +64,7 @@ def _should_store(ev: Event) -> bool:
 
 async def _event_pump(ctx: AppContext) -> None:
     """store + rules for every event on the bus."""
-    q = ctx.bus.subscribe()
+    q = ctx.bus.subscribe(unbounded=True)
     country_saves = 0
     try:
         while True:
@@ -105,8 +105,8 @@ async def _device_watch(ctx: AppContext) -> None:
             ctx.device.clear()
             ctx.device.update(info)
             if info.get("connected") and ctx.maps:
-                if was_connected is not True:
-                    await asyncio.to_thread(ctx.maps.refresh_uid_map)
+                # keep the uid→package map fresh off the event loop
+                await asyncio.to_thread(ctx.maps.ensure_uid_map)
             if was_connected is not None and was_connected != info.get("connected"):
                 ctx.emit(Event(
                     kind="log.line",
@@ -168,8 +168,10 @@ def create_app(cfg: Config) -> FastAPI:
     app.state.ctx = ctx
 
     # ---------- REST ----------
+    # handlers are plain `def`: FastAPI runs them in its threadpool, keeping
+    # the (synchronous) sqlite reads off the event loop
     @app.get("/api/status")
-    async def status():
+    def status():
         s = ctx.state
         return {
             "version": __version__,
@@ -190,24 +192,24 @@ def create_app(cfg: Config) -> FastAPI:
         }
 
     @app.get("/api/events")
-    async def events(prefix: str | None = None, kinds: str | None = None,
-                     since: float | None = None, limit: int = 200,
-                     app_filter: str | None = Query(default=None, alias="app")):
+    def events(prefix: str | None = None, kinds: str | None = None,
+               since: float | None = None, limit: int = 200,
+               app_filter: str | None = Query(default=None, alias="app")):
         kind_list = [k for k in (kinds or "").split(",") if k] or None
         return ctx.store.events(kinds=kind_list, prefix=prefix, app=app_filter,
                                 since=since, limit=limit)
 
     @app.get("/api/alerts")
-    async def alerts(state: str | None = "open", limit: int = 100):
+    def alerts(state: str | None = "open", limit: int = 100):
         return ctx.store.alerts(state=state if state != "all" else None, limit=limit)
 
     @app.post("/api/alerts/{alert_id}/state")
-    async def set_alert_state(alert_id: int, body: dict):
+    def set_alert_state(alert_id: int, body: dict):
         ok = ctx.store.set_alert_state(alert_id, str(body.get("state", "")))
         return JSONResponse({"ok": ok}, status_code=200 if ok else 400)
 
     @app.get("/api/apps")
-    async def apps():
+    def apps():
         inv = dict(ctx.state.get("apps") or {})
         god = ctx.state.get("godmode") or {}
         stats = ctx.state.get("netstats") or {}
@@ -226,21 +228,20 @@ def create_app(cfg: Config) -> FastAPI:
         return out
 
     @app.get("/api/netstats")
-    async def netstats():
+    def netstats():
         return ctx.state.get("netstats") or {}
 
     @app.get("/api/rules")
-    async def rules():
+    def rules():
         return [{"id": r.id, "name": r.name, "severity": r.severity,
                  "description": r.description, "enabled": r.enabled}
                 for r in ctx.rules.rules.values()]
 
     @app.post("/api/rules/{rule_id}")
-    async def toggle_rule(rule_id: str, body: dict):
+    def toggle_rule(rule_id: str, body: dict):
         ok = ctx.rules.set_enabled(rule_id, bool(body.get("enabled", True)))
         if ok:
-            await asyncio.to_thread(ctx.store.put_snapshot, "rules_enabled",
-                                    ctx.rules.enabled_map())
+            ctx.store.put_snapshot("rules_enabled", ctx.rules.enabled_map())
         return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
 
     # ---------- WebSocket ----------

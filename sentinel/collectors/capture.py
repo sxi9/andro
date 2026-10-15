@@ -46,30 +46,32 @@ class CaptureCollector(Collector):
             ))
             return
 
-        failures = 0
-        while failures < 4:
+        # Keep retrying forever with backoff: a USB unplug or reboot must not
+        # permanently disable hostname capture for the rest of the session.
+        backoff = 3.0
+        while True:
             cmd = (f"{cfg.tcpdump_path} -i any -s 1024 -U -n -w - '{_FILTER}'")
-            try:
-                proc = adb.popen_raw(cmd, su=True)
-            except Exception as e:
-                self.log.warning("tcpdump start failed: %s", e)
-                failures += 1
-                await asyncio.sleep(5)
-                continue
-            self.ctx.state["capture"] = True
-            self.log.info("tcpdump hostname capture attached")
             started = time.time()
             try:
-                await asyncio.to_thread(self._pump, proc)
-            finally:
+                proc = adb.popen_raw(cmd, su=True)
+                self.ctx.state["capture"] = True
+                self.log.info("tcpdump hostname capture attached")
                 try:
-                    proc.kill()
-                except Exception:
-                    pass
+                    await asyncio.to_thread(self._pump, proc)
+                finally:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            except Exception as e:
+                self.log.warning("tcpdump start failed: %s", e)
             self.ctx.state["capture"] = False
-            failures = 0 if time.time() - started > 60 else failures + 1
-            await asyncio.sleep(3)
-        self.log.warning("tcpdump keeps dying; hostname capture disabled")
+            if time.time() - started > 60:
+                backoff = 3.0          # it ran fine for a while; retry quickly
+            else:
+                backoff = min(backoff * 2, 120.0)
+                self.log.info("capture exited fast; retrying in %.0fs", backoff)
+            await asyncio.sleep(backoff)
 
     def _pump(self, proc) -> None:
         stream = PcapStream()

@@ -10,6 +10,7 @@ this tool introduces.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
 from ..core.events import Event, SEV_NOTICE, SEV_WARN
@@ -86,7 +87,7 @@ class ThreatsCollector(Collector):
         installers = {p: (d.get("installer") if isinstance(d, dict) else None)
                       for p, d in (self.ctx.state.get("apps") or {}).items()}
 
-        baseline = self.ctx.store.get_snapshot(_SNAPSHOT_KEY)
+        baseline = await asyncio.to_thread(self.ctx.store.get_snapshot, _SNAPSHOT_KEY)
         if baseline is not None:
             for access, pkgs in current.items():
                 old = set(baseline.get(access) or [])
@@ -113,7 +114,8 @@ class ThreatsCollector(Collector):
                     detail=fp,
                     data={"added": True, "fingerprint": fp},
                 ))
-        self.ctx.store.put_snapshot(_SNAPSHOT_KEY, {**current, "cas": sorted(cas)})
+        await asyncio.to_thread(self.ctx.store.put_snapshot, _SNAPSHOT_KEY,
+                                {**current, "cas": sorted(cas)})
 
         if adb_wifi == "1":
             self.ctx.emit(Event(

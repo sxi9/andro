@@ -23,8 +23,10 @@ class EventBus:
     def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
 
-    def subscribe(self) -> asyncio.Queue[Event]:
-        q: asyncio.Queue[Event] = asyncio.Queue(maxsize=_MAX_QUEUE)
+    def subscribe(self, *, unbounded: bool = False) -> asyncio.Queue[Event]:
+        """Bounded by default (slow WebSocket clients drop oldest). The store/
+        rules pump subscribes unbounded so no event is ever lost to backpressure."""
+        q: asyncio.Queue[Event] = asyncio.Queue(maxsize=0 if unbounded else _MAX_QUEUE)
         self._subs.add(q)
         return q
 

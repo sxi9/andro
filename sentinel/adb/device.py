@@ -75,11 +75,16 @@ class DeviceMaps:
             self._uid2pkg = m
             self._uid_ts = time.time()
 
+    def ensure_uid_map(self, max_age: float = 120.0) -> None:
+        """Refresh the uid map if stale. Blocking — call from a thread, never
+        from the event loop (the device watcher does this on a cadence)."""
+        if time.time() - self._uid_ts > max_age:
+            self.refresh_uid_map()
+
     def app_for_uid(self, uid: int | None) -> str | None:
+        """Pure dict lookup — safe to call from the event loop."""
         if uid is None:
             return None
-        if time.time() - self._uid_ts > max(self.ttl * 10, 120):
-            self.refresh_uid_map()
         if uid in SYSTEM_UIDS:
             return SYSTEM_UIDS[uid]
         pkg = self._uid2pkg.get(uid)
@@ -121,6 +126,6 @@ class DeviceMaps:
         return uid, name.split(":", 1)[0]
 
     def all_packages(self) -> dict[int, str]:
-        if not self._uid2pkg:
-            self.refresh_uid_map()
+        """Pure copy of the cached uid→package map (may be empty before the
+        first refresh; the device watcher keeps it fresh off the event loop)."""
         return dict(self._uid2pkg)

@@ -4,6 +4,8 @@ survive restarts of the dashboard.
 """
 from __future__ import annotations
 
+import asyncio
+
 from ..core.events import Event, SEV_INFO, SEV_NOTICE, SEV_WARN
 from ..parsers.packagedump import parse_packages_dump, parse_pm_list
 from .base import Collector
@@ -47,9 +49,9 @@ class PackagesCollector(Collector):
             }
         self.ctx.state["apps"] = inv
 
-        baseline = self.ctx.store.get_snapshot(_SNAPSHOT_KEY)
+        baseline = await asyncio.to_thread(self.ctx.store.get_snapshot, _SNAPSHOT_KEY)
         if baseline is None:
-            self.ctx.store.put_snapshot(_SNAPSHOT_KEY, inv)
+            await asyncio.to_thread(self.ctx.store.put_snapshot, _SNAPSHOT_KEY, inv)
             self.log.info("package baseline recorded: %d third-party apps", len(inv))
             self._check_combos(inv, default_sms)
             return
@@ -93,7 +95,7 @@ class PackagesCollector(Collector):
                 title=f"App removed: {pkg}", app=pkg, data={},
             ))
 
-        self.ctx.store.put_snapshot(_SNAPSHOT_KEY, inv)
+        await asyncio.to_thread(self.ctx.store.put_snapshot, _SNAPSHOT_KEY, inv)
         self._check_combos(inv, default_sms)
 
     def _check_combos(self, inv: dict[str, dict], default_sms: str) -> None:

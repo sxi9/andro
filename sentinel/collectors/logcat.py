@@ -19,24 +19,24 @@ class LogcatCollector(Collector):
         assert self.ctx.adb is not None
         backoff = 2.0
         while True:
+            started = time.time()
             try:
-                proc = self.ctx.adb.popen_lines("logcat -b main,system,crash,events -v threadtime -T 1")
+                proc = self.ctx.adb.popen_lines(
+                    "logcat -b main,system,crash,events -v threadtime -T 1")
+                self.log.info("logcat stream attached")
+                try:
+                    await asyncio.to_thread(self._pump, proc, parse_line)
+                finally:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
             except Exception as e:
                 self.log.warning("logcat start failed: %s", e)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
-                continue
-            backoff = 2.0
-            self.log.info("logcat stream attached")
-            try:
-                await asyncio.to_thread(self._pump, proc, parse_line)
-            finally:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            self.log.warning("logcat stream ended; reattaching")
-            await asyncio.sleep(2.0)
+            # a stream that died immediately (no device) backs off; a stream
+            # that ran for a while reattaches quickly
+            backoff = 2.0 if time.time() - started > 30 else min(backoff * 2, 60)
+            await asyncio.sleep(backoff)
 
     def _pump(self, proc, parse_line) -> None:
         assert proc.stdout is not None

@@ -34,23 +34,37 @@ class CaptureCollector(Collector):
         assert adb is not None
         if not cfg.tcpdump:
             return
-        ok_root = await asyncio.to_thread(adb.has_root)
-        ok_bin = await asyncio.to_thread(adb.has_binary, cfg.tcpdump_path)
-        if not (ok_root and ok_bin):
+        # Probe until the capability appears: the server may start before the
+        # device is plugged in, so a failed probe backs off and retries rather
+        # than disabling hostname capture for the whole session.
+        announced = False
+        probe_backoff = 5.0
+        while True:
+            ok_root = await asyncio.to_thread(adb.has_root)
+            ok_bin = ok_root and await asyncio.to_thread(adb.has_binary, cfg.tcpdump_path)
+            if ok_root and ok_bin:
+                break
             self.ctx.state["capture"] = False
-            self.ctx.emit(Event(
-                kind="log.line", severity=SEV_NOTICE, title="hostname capture off",
-                detail="tcpdump or root unavailable on the device — destinations will "
-                       "show as IPs. Push a static tcpdump binary to enable hostnames.",
-                data={"level": "W", "tag": "sentinel", "buffer": "sys"},
-            ))
-            return
+            if not announced:
+                announced = True
+                self.ctx.emit(Event(
+                    kind="log.line", severity=SEV_NOTICE, title="hostname capture off",
+                    detail="tcpdump or root unavailable on the device — destinations will "
+                           "show as IPs until it appears. Push a static tcpdump binary "
+                           "to enable hostnames.",
+                    data={"level": "W", "tag": "sentinel", "buffer": "sys"},
+                ))
+            await asyncio.sleep(probe_backoff)
+            probe_backoff = min(probe_backoff * 2, 120.0)
 
         # Keep retrying forever with backoff: a USB unplug or reboot must not
         # permanently disable hostname capture for the rest of the session.
         backoff = 3.0
         while True:
-            cmd = (f"{cfg.tcpdump_path} -i any -s 1024 -U -n -w - '{_FILTER}'")
+            # snaplen 4096: current Chrome/Android ClientHellos carry a
+            # post-quantum key_share (~1.2KB+), overflowing a 1024 snap and
+            # losing the SNI; the BPF filter keeps volume tiny regardless
+            cmd = (f"{cfg.tcpdump_path} -i any -s 4096 -U -n -w - '{_FILTER}'")
             started = time.time()
             try:
                 proc = adb.popen_raw(cmd, su=True)

@@ -141,3 +141,23 @@ def test_mitm_trio():
     eng = RulesEngine()
     a = eng.handle(ev("threat.mitm", signature="9a3b|proxy:8080"))
     assert len(a) == 1 and a[0].data["rule"] == "mitm_trio"
+
+
+def test_rejected_background_attempt_no_alert():
+    eng = RulesEngine()
+    # the OS BLOCKED this attempt: must not alert or prime the egress correlation
+    assert eng.handle(ev("sensor.mic", app="com.spy", uid=10500,
+                         background=True, rejected=True)) == []
+    assert eng.handle(ev("net.conn", app="com.spy", uid=10500,
+                         ip="1.2.3.4", port=443)) == []
+
+
+def test_sideload_allowlist_defeats_fake_installer():
+    eng = RulesEngine()
+    # attacker-chosen installer name is not on the trusted allowlist -> fires
+    a = eng.handle(ev("app.install", app="com.spy", installer="com.fake.store"))
+    assert any(x.data["rule"] == "sideload_install" for x in a)
+    # system packages (preinstalled accessibility services) stay quiet
+    a = eng.handle(ev("threat.godmode", app="com.android.talkback",
+                      added=True, access="accessibility", installer="(system)"))
+    assert not any(x.data["rule"] == "sideload_godmode" for x in a)

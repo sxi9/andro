@@ -31,9 +31,15 @@ DANGEROUS_PERMS = {
     "android.permission.SYSTEM_ALERT_WINDOW",
 }
 
-PLAY_INSTALLERS = {"com.android.vending"}
-SIDELOAD_INSTALLERS = {None, "", "com.android.shell", "com.google.android.packageinstaller",
-                       "com.android.packageinstaller"}
+# Allowlist, not denylist: the installer string is attacker-influenced (any app
+# can name itself whatever it wants and stalkerware ships via pm/adb installs
+# that report arbitrary or missing installers). Anything not provably from a
+# trusted store counts as sideloaded. "(system)" marks preinstalled packages.
+TRUSTED_INSTALLERS = {"com.android.vending", "com.sec.android.app.samsungapps", "(system)"}
+
+
+def is_sideloaded(installer: str | None) -> bool:
+    return installer not in TRUSTED_INSTALLERS
 TWO_G = {"GPRS", "EDGE", "GSM", "CDMA", "1xRTT", "IDEN"}
 FAST_G = {"LTE", "LTE_CA", "NR", "NR_SA", "NR_NSA", "HSPAP", "HSPA", "UMTS"}
 
@@ -164,7 +170,11 @@ class RulesEngine:
         app = ev.app or "?"
 
         # --- sensors ---
-        if ev.kind in ("sensor.mic", "sensor.cam") and ev.data.get("background"):
+        # a Reject entry means the OS BLOCKED the attempt: nothing was
+        # recorded, so it must not raise "was used in the background"
+        rejected = bool(ev.data.get("rejected"))
+        if ev.kind in ("sensor.mic", "sensor.cam") and ev.data.get("background") \
+                and not rejected:
             if ev.uid is not None:
                 self._recent_bg_sensor[ev.uid] = ev.ts
             what = "microphone" if ev.kind == "sensor.mic" else "camera"
@@ -172,10 +182,10 @@ class RulesEngine:
                  f"Background {what} use by {app}",
                  f"{app} accessed the {what} while not on screen.",
                  {"op": ev.data.get("op")})
-        elif ev.kind == "sensor.loc" and ev.data.get("background"):
+        elif ev.kind == "sensor.loc" and ev.data.get("background") and not rejected:
             fire("bg_location", app, f"Background location access by {app}",
                  f"{app} read device location from the background.")
-        elif ev.kind == "sensor.clip" and ev.data.get("background"):
+        elif ev.kind == "sensor.clip" and ev.data.get("background") and not rejected:
             fire("bg_clipboard", app, f"Background clipboard read by {app}",
                  f"{app} read the clipboard while not focused.")
 
@@ -230,7 +240,7 @@ class RulesEngine:
 
         # --- packages ---
         elif ev.kind == "app.install":
-            if ev.data.get("installer") in SIDELOAD_INSTALLERS:
+            if is_sideloaded(ev.data.get("installer")):
                 fire("sideload_install", app, f"Sideloaded app installed: {app}",
                      f"Installer: {ev.data.get('installer') or 'unknown (adb / file manager)'}.",
                      {"installer": ev.data.get("installer")})
@@ -251,10 +261,10 @@ class RulesEngine:
                 kind = ev.data.get("access", "god-mode")
                 fire("new_godmode", f"{app}:{kind}", f"{app} enabled {kind}",
                      f"{app} now holds {kind} access.", {"access": kind})
-                if ev.data.get("installer") in SIDELOAD_INSTALLERS:
+                if is_sideloaded(ev.data.get("installer")):
                     fire("sideload_godmode", f"{app}:{kind}",
                          f"Sideloaded app with {kind}: {app}",
-                         "An app installed outside the Play Store holds god-mode access. "
+                         "An app installed outside a trusted store holds god-mode access. "
                          "Investigate immediately.", {"access": kind})
         elif ev.kind == "threat.ca":
             if ev.data.get("added"):

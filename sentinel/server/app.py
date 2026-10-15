@@ -11,9 +11,12 @@ import logging
 import time
 from pathlib import Path
 
+from urllib.parse import urlparse
+
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .. import __version__
 from ..adb.client import AdbClient, AdbError
@@ -167,6 +170,24 @@ def create_app(cfg: Config) -> FastAPI:
     app = FastAPI(title="Android Sentinel", version=__version__, lifespan=lifespan)
     app.state.ctx = ctx
 
+    # This dashboard reads your whole device; it is local-only by design.
+    # Host validation defeats DNS-rebinding (a remote page resolving its own
+    # domain to 127.0.0.1 to reach the REST API with a non-local Host header).
+    _local_hosts = {"127.0.0.1", "localhost", "::1"}
+    if cfg.host not in ("0.0.0.0", "::"):
+        _local_hosts.add(cfg.host)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(_local_hosts))
+
+    def _origin_ok(origin: str | None) -> bool:
+        """Browsers send Origin on WebSocket upgrades; a cross-site page gets
+        rejected here (CSWSH). Non-browser clients send no Origin — allowed."""
+        if not origin:
+            return True
+        try:
+            return (urlparse(origin).hostname or "") in _local_hosts
+        except ValueError:
+            return False
+
     # ---------- REST ----------
     # handlers are plain `def`: FastAPI runs them in its threadpool, keeping
     # the (synchronous) sqlite reads off the event loop
@@ -247,6 +268,9 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------- WebSocket ----------
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
+        if not _origin_ok(sock.headers.get("origin")):
+            await sock.close(code=4403)
+            return
         await sock.accept()
         q = ctx.bus.subscribe()
         try:

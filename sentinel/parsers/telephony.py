@@ -8,11 +8,12 @@ _CALL = re.compile(r"\bmCallState=(\d)")
 _RAT = re.compile(r"RilDataRadioTechnology=\d+\(([A-Z0-9_]+)\)")
 _RAT2 = re.compile(r"\bgetDataNetworkType\(\)=?(\d+)|\bmDataNetworkType=(\d+)")
 _DISPLAY = re.compile(r"TelephonyDisplayInfo.*?network=([A-Z0-9_]+)")
-_CI = re.compile(r"\bmCi=(\d+)")
-_CID = re.compile(r"\bmCid=(\d+)")
-_TAC = re.compile(r"\bmTac=(\d+)")
-_LAC = re.compile(r"\bmLac=(\d+)")
-_PCI = re.compile(r"\bmPci=(\d+)")
+_CI = re.compile(r"\bmCi\s*=\s*(\d+)")
+_NCI = re.compile(r"\bmNci\s*=\s*(\d+)")      # 5G standalone (CellIdentityNr)
+_CID = re.compile(r"\bmCid\s*=\s*(\d+)")
+_TAC = re.compile(r"\bmTac\s*=\s*(\d+)")
+_LAC = re.compile(r"\bmLac\s*=\s*(\d+)")
+_PCI = re.compile(r"\bmPci\s*=\s*(\d+)")
 _OPER = re.compile(r'mOperatorAlphaLong=([^,\]]+)|mAlphaLong=([^,\s\]]+)')
 
 CALL_STATES = {0: "idle", 1: "ringing", 2: "offhook"}
@@ -47,13 +48,16 @@ def parse_telephony_registry(text: str) -> dict[str, Any]:
                 out["network_type"] = m.group(1)
 
     cell: dict[str, int] = {}
-    for rx, key in ((_CI, "ci"), (_CID, "ci"), (_TAC, "tac"), (_LAC, "tac"), (_PCI, "pci")):
+    for rx, key in ((_CI, "ci"), (_NCI, "ci"), (_CID, "ci"),
+                    (_TAC, "tac"), (_LAC, "tac"), (_PCI, "pci")):
         if key in cell:
             continue
         m = rx.search(text)
         if m:
             v = int(m.group(1))
-            if 0 < v < 2**31 - 1:   # unset fields dump as 0 / 2147483647
+            # unset sentinels: 0, Integer.MAX_VALUE, Long.MAX_VALUE; the NR
+            # NCI is 36 bits, so accept anything below 2^40
+            if 0 < v < 2**40 and v != 2**31 - 1:
                 cell[key] = v
     if cell:
         out["cell"] = cell

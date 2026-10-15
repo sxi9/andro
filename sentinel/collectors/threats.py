@@ -68,7 +68,9 @@ class ThreatsCollector(Collector):
 
         cas: set[str] = set()
         for path in _CA_PATHS:
-            out = await adb.shell(f"ls -1 {path} 2>/dev/null", su=True, timeout=10)
+            # `|| true` keeps a missing directory (exit 1 under shell-v2/su)
+            # from raising and aborting the whole audit poll
+            out = await adb.shell(f"ls -1 {path} 2>/dev/null || true", su=True, timeout=10)
             cas |= {ln.strip() for ln in out.splitlines()
                     if ln.strip() and "No such file" not in ln}
 
@@ -84,8 +86,15 @@ class ThreatsCollector(Collector):
         self.ctx.state["user_cas"] = sorted(cas)
         self.ctx.state["adb_wifi"] = adb_wifi == "1"
 
+        # packages absent from the third-party inventory are preinstalled;
+        # "(system)" keeps stock accessibility services (TalkBack etc.) from
+        # tripping the sideload+god-mode combo
+        third_party = self.ctx.state.get("apps") or {}
         installers = {p: (d.get("installer") if isinstance(d, dict) else None)
-                      for p, d in (self.ctx.state.get("apps") or {}).items()}
+                      for p, d in third_party.items()}
+
+        def installer_of(pkg: str) -> str | None:
+            return installers.get(pkg, "(system)") if third_party else "(system)"
 
         baseline = await asyncio.to_thread(self.ctx.store.get_snapshot, _SNAPSHOT_KEY)
         if baseline is not None:
@@ -97,7 +106,7 @@ class ThreatsCollector(Collector):
                         title=f"{pkg} enabled {access}",
                         app=pkg,
                         data={"added": True, "access": access,
-                              "installer": installers.get(pkg)},
+                              "installer": installer_of(pkg)},
                     ))
                 for pkg in old - set(pkgs):
                     self.ctx.emit(Event(

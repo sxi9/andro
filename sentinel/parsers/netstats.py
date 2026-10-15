@@ -26,8 +26,13 @@ def parse_netstats_detail(text: str) -> dict[int, dict[str, int]]:
     for line in text.splitlines():
         m = _IDENT.search(line)
         if m:
-            nettype, uid, _set, tag = m.groups()
+            nettype, uid, set_, tag = m.groups()
             if tag not in ("0x0", "0"):
+                cur = None
+                continue
+            # DBG_VPN_IN / DBG_VPN_OUT duplicate the DEFAULT/FOREGROUND sets
+            # for VPN users; summing them double-counts traffic
+            if set_ not in ("DEFAULT", "FOREGROUND"):
                 cur = None
                 continue
             kind = "mobile" if nettype.startswith("MOBILE") else (

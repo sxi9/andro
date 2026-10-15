@@ -146,15 +146,21 @@ UID stats:
   ident=[{type=WIFI, subType=COMBINED}] uid=10155 set=DEFAULT tag=0x1234
     NetworkStatsHistory: bucketDuration=7200
       st=1760500800 rb=99999 rp=3 tb=99999 tp=5 op=0
+  ident=[{type=WIFI, subType=COMBINED}] uid=10155 set=DBG_VPN_IN tag=0x0
+    NetworkStatsHistory: bucketDuration=7200
+      st=1760500800 rb=77777 rp=3 tb=77777 tp=5 op=0
+  ident=[{type=WIFI, subType=COMBINED}] uid=10155 set=FOREGROUND tag=0x0
+    NetworkStatsHistory: bucketDuration=7200
+      st=1760500800 rb=100 rp=1 tb=50 tp=1 op=0
 """
 
 
 def test_netstats_totals_and_tag_skip():
     t = parse_netstats_detail(NETSTATS)
-    assert t[10155]["wifi_rx"] == 3000
-    assert t[10155]["wifi_tx"] == 1200
+    # DEFAULT + FOREGROUND counted; tagged and DBG_VPN_* sets excluded
+    assert t[10155]["wifi_rx"] == 3100
+    assert t[10155]["wifi_tx"] == 1250
     assert t[10155]["mobile_tx"] == 900
-    # tagged bucket (tag=0x1234) must not double count
     assert t[10155]["wifi_rx"] < 10000
 
 
@@ -307,3 +313,24 @@ def test_pcap_stream_sni_end_to_end():
     assert len(pkts) == 1
     assert pkts[0].proto == "tcp" and pkts[0].dport == 443
     assert extract_sni(pkts[0].payload) == "api.snapchat.com"
+
+
+def test_telephony_nr_standalone():
+    text = """mCallState=2
+mServiceState=... RilDataRadioTechnology=20(NR) ...
+mCellIdentity=CellIdentityNr:{ mPci = 301 mTac = 999 mNci = 123456789 mMcc = 310 }
+"""
+    t = parse_telephony_registry(text)
+    assert t["call_state"] == "offhook"
+    assert t["network_type"] == "NR"
+    assert t["cell"]["ci"] == 123456789 and t["cell"]["tac"] == 999
+
+
+def test_camera_closed_section_not_live():
+    text = (
+        "Device 0 is open. Client instance dump:\n"
+        "  Client package: com.live.app\n"
+        "Device 1 is closed\n"
+        "  Client package: com.stale.app\n"
+    )
+    assert parse_camera_clients(text) == {"com.live.app"}

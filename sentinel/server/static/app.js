@@ -36,6 +36,8 @@
     $(".scroll").scrollTop = 0;
     if (tab === "apps") loadApps();
     if (tab === "alerts") { loadAlerts(); loadRules(); }
+    if (tab === "logs") renderLogs();
+    if (tab === "radio") renderRadioLog();
   }
   $$("[data-nav] button").forEach(function (b) {
     b.addEventListener("click", function () { go(b.dataset.tab); });
@@ -115,6 +117,10 @@
       '<span class="lv ' + esc(d.level || "I") + '">' + esc(d.level || "I") + "</span>" +
       '<span class="lp">' + esc(d.tag || ev.title) + "</span>" +
       '<span class="lm">' + esc((ev.app ? "[" + shortApp(ev.app) + "] " : "") + ev.detail) + "</span></div>";
+  }
+  function renderRadioLog() {
+    $("#radiolog").innerHTML = radioLogs.map(logLineHTML).join("") ||
+      '<div class="empty">no radio log lines yet</div>';
   }
   function renderLogs() {
     var out = sysLogs.filter(function (ev) {
@@ -425,20 +431,32 @@
   fetch("/api/netstats").then(function (r) { return r.json(); }).then(renderEgress).catch(function () {});
 
   /* ---------- initial feed backfill ---------- */
+  // Buffer live WS events until the backfill has rendered, then replay them,
+  // so history and live events land in order; stored events dedupe by id.
+  var backfillDone = false, wsBuffer = [], seenIds = {};
+  function flushBuffer() {
+    backfillDone = true;
+    wsBuffer.forEach(routeEvent);
+    wsBuffer = [];
+  }
   fetch("/api/events?limit=60").then(function (r) { return r.json(); }).then(function (evs) {
     (evs || []).reverse().forEach(routeEvent);
-  }).catch(function () {});
+    flushBuffer();
+  }).catch(flushBuffer);
 
   /* ---------- websocket ---------- */
   function routeEvent(ev) {
+    if (ev.id != null) {
+      if (seenIds[ev.id]) return;
+      if (Object.keys(seenIds).length > 5000) seenIds = {};
+      seenIds[ev.id] = 1;
+    }
     var group = ev.kind.split(".")[0];
     if (ev.kind === "log.line") {
       var buf = (ev.data || {}).buffer;
       if (buf === "radio") {
         radioLogs.unshift(ev); radioLogs = radioLogs.slice(0, 300);
-        if (currentTab === "radio") {
-          $("#radiolog").innerHTML = radioLogs.map(logLineHTML).join("");
-        }
+        if (currentTab === "radio") renderRadioLog();
       } else {
         sysLogs.unshift(ev); sysLogs = sysLogs.slice(0, 500);
         if (currentTab === "logs") renderLogs();
@@ -463,7 +481,8 @@
     if (group === "radio") {
       radioLogs.unshift({ ts: ev.ts, data: { level: "I", tag: ev.kind }, app: null,
         detail: ev.title + (ev.detail ? " — " + ev.detail : "") });
-      if (currentTab === "radio") $("#radiolog").innerHTML = radioLogs.map(logLineHTML).join("");
+      if (ev.kind === "radio.cell") $("#r-change").textContent = fmtTime(ev.ts);
+      if (currentTab === "radio") renderRadioLog();
     }
     if (ev.kind === "alert") {
       if (ev.data && ev.data.ip) alertedIPs[ev.data.ip] = 1;
@@ -481,7 +500,11 @@
       $("#wstext").textContent = "CAPTURING";
     };
     ws.onmessage = function (m) {
-      try { routeEvent(JSON.parse(m.data)); } catch (e) {}
+      try {
+        var ev = JSON.parse(m.data);
+        if (!backfillDone) { wsBuffer.push(ev); return; }
+        routeEvent(ev);
+      } catch (e) {}
     };
     ws.onclose = function () {
       $("#wsstate").classList.add("off");

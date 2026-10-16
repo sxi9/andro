@@ -72,6 +72,11 @@
     if (tab === "radio") renderRadioLog();
     if (tab === "storage") loadStorage();
     if (tab === "devices") loadDevices();
+    var gs = $("#gsearch");
+    if (gs) {
+      gs.placeholder = "Search " + (titles[tab] ? titles[tab][0].toLowerCase() : "this tab");
+      if (typeof applyGlobalSearch === "function") applyGlobalSearch();
+    }
   }
   $$("[data-nav] button").forEach(function (b) {
     b.addEventListener("click", function () { go(b.dataset.tab); });
@@ -127,7 +132,8 @@
     var icls = group === "sensor" && ev.kind === "sensor.loc" ? "loc" : group;
     var pill = pillFor(ev);
     return '<div class="ev' + (flash ? " flash" : "") + '" data-transport="' +
-      esc((ev.data || {}).transport || "") + '">' +
+      esc((ev.data || {}).transport || "") + '" data-sev="' + esc(ev.severity) + '"' +
+      (ev.app ? ' data-app="' + esc(ev.app) + '" title="Click to open ' + esc(shortApp(ev.app)) + ' in Apps"' : "") + ">" +
       '<div class="ic ' + icls + '">' + icon(group) + "</div>" +
       '<div class="body"><div class="t1"><b>' + esc(ev.title) + "</b></div>" +
       (ev.detail ? '<div class="t2">' + esc(ev.detail) + "</div>" : "") + "</div>" +
@@ -140,6 +146,27 @@
     if (empty) empty.remove();
     el.insertAdjacentHTML("afterbegin", evHTML(ev, true));
     while (el.children.length > (max || 60)) el.removeChild(el.lastChild);
+    applyRowFilters(el.firstChild, el.id);
+  }
+
+  /* severity filter (monitor feed) + global search, applied per row */
+  var sevFilter = "all";
+  var SEV_RANK = { info: 0, notice: 1, warn: 2, crit: 3 };
+  function rowMatchesFilters(row, containerId) {
+    if (!row || row.nodeType !== 1) return true;
+    if (containerId === "feed-mon" && sevFilter !== "all") {
+      var min = sevFilter === "warn" ? 2 : 1;
+      if ((SEV_RANK[row.dataset.sev] || 0) < min) return false;
+    }
+    if (containerId === "feed-net" && curTransport !== "all" &&
+        row.dataset.transport !== curTransport) return false;
+    var q = gQuery();
+    if (q && row.textContent.toLowerCase().indexOf(q) < 0) return false;
+    return true;
+  }
+  function applyRowFilters(row, containerId) {
+    if (row && row.nodeType === 1 && row.style)
+      row.style.display = rowMatchesFilters(row, containerId) ? "" : "none";
   }
 
   /* ---------- log views ---------- */
@@ -235,7 +262,7 @@
       '<text class="nm" x="' + cx + '" y="' + (cy + 52) + '" text-anchor="middle">this device</text></g>';
     svg.innerHTML = h;
   }
-  setInterval(renderFlow, 5000);
+  setInterval(function () { renderFlow(); renderDestTable(); }, 5000);
 
   /* ---------- sensor cards (privacy tab) ---------- */
   var sensorLast = {};  // kind -> ev
@@ -364,77 +391,139 @@
   var DANGEROUS = ["READ_SMS", "RECEIVE_SMS", "RECORD_AUDIO", "CAMERA", "ACCESS_FINE_LOCATION",
     "ACCESS_BACKGROUND_LOCATION", "READ_CONTACTS", "READ_CALL_LOG", "SYSTEM_ALERT_WINDOW",
     "REQUEST_INSTALL_PACKAGES", "QUERY_ALL_PACKAGES"];
+  var lastApps = [];
   function loadApps() {
     fetch(dq("/api/apps")).then(function (r) { return r.json(); }).then(function (apps) {
-      $("#t-apps").textContent = apps.length;
+      lastApps = apps || [];
+      $("#t-apps").textContent = lastApps.length;
       var god = 0, side = 0;
-      var h = apps.map(function (a) {
+      lastApps.forEach(function (a) {
         if (a.godmode && a.godmode.length) god++;
-        var sideloaded = !a.installer || a.installer.indexOf("vending") < 0;
-        if (sideloaded) side++;
-        var granted = (a.granted || []).map(function (p) { return p.split(".").pop(); });
-        var hot = granted.filter(function (p) { return DANGEROUS.indexOf(p) >= 0; });
-        var risk = a.risk || 0;
-        var rcls = risk >= 70 ? "r" : risk >= 40 ? "y" : "g";
-        return '<div class="approw"><div class="score ' + rcls + '" title="' +
-          esc((a.risk_factors || []).join("; ") || "low risk") + '">' + risk + "</div>" +
-          '<div class="appmeta"><div class="nm">' + esc(shortApp(a.package)) +
-          (a.godmode || []).map(function (g) { return ' <span class="pill crit">' + esc(g) + "</span>"; }).join("") +
-          "</div>" +
-          '<div class="pk">' + esc(a.package) + " · " +
-          (sideloaded ? "sideloaded" : esc(a.installer)) +
-          (a.version_name ? " · v" + esc(a.version_name) : "") + "</div>" +
-          '<div class="chips">' +
-          (a.data_size ? '<span class="pill">' + fmtBytes(a.data_size) + " data</span>" : "") +
-          (a.mtx ? '<span class="pill">' + fmtBytes(a.mtx) + " cellular</span>" : "") +
-          (sideloaded ? '<span class="pill warn">not Play</span>' : "") + "</div>" +
-          (hot.length ? '<div class="perms">' + hot.map(function (p) {
-            return '<span class="perm hot">' + esc(p) + "</span>";
-          }).join("") + "</div>" : "") +
-          "</div></div>";
-      }).join("");
-      $("#applist").innerHTML = h || '<div class="empty">no third-party apps found yet</div>';
+        if (!a.installer || a.installer.indexOf("vending") < 0) side++;
+      });
       $("#t-god2").textContent = god;
       $("#t-side").textContent = side;
+      renderApps();
     }).catch(function () {});
   }
 
+  function renderApps() {
+    var q = ($("#appsearch").value || "").toLowerCase();
+    var sort = $("#appsort").value;
+    var rows = lastApps.filter(function (a) {
+      if (!q) return true;
+      var hay = (a.package + " " + (a.version_name || "") + " " +
+        (a.installer || "") + " " + (a.granted || []).join(" ") + " " +
+        (a.godmode || []).join(" ")).toLowerCase();
+      return hay.indexOf(q) >= 0;
+    });
+    var cmp = {
+      risk: function (a, b) { return (b.risk || 0) - (a.risk || 0); },
+      name: function (a, b) { return shortApp(a.package).localeCompare(shortApp(b.package)); },
+      data: function (a, b) { return (b.data_size || 0) - (a.data_size || 0); },
+      cell: function (a, b) { return (b.mtx || 0) - (a.mtx || 0); },
+      tx: function (a, b) { return (b.tx || 0) - (a.tx || 0); },
+    }[sort] || function () { return 0; };
+    rows.sort(cmp);
+    var h = rows.map(function (a) {
+      var sideloaded = !a.installer || a.installer.indexOf("vending") < 0;
+      var granted = (a.granted || []).map(function (p) { return p.split(".").pop(); });
+      var hot = granted.filter(function (p) { return DANGEROUS.indexOf(p) >= 0; });
+      var risk = a.risk || 0;
+      var rcls = risk >= 70 ? "r" : risk >= 40 ? "y" : "g";
+      return '<div class="approw clickable" data-app="' + esc(a.package) +
+        '" title="Click to inspect storage, logs and backup options">' +
+        '<div class="score ' + rcls + '" data-tip="Risk ' + risk + "/100: " +
+        esc((a.risk_factors || []).join("; ") || "no risk factors") + '">' + risk + "</div>" +
+        '<div class="appmeta"><div class="nm">' + esc(shortApp(a.package)) +
+        (a.godmode || []).map(function (g) { return ' <span class="pill crit">' + esc(g) + "</span>"; }).join("") +
+        "</div>" +
+        '<div class="pk">' + esc(a.package) + " · " +
+        (sideloaded ? "sideloaded" : esc(a.installer)) +
+        (a.version_name ? " · v" + esc(a.version_name) : "") + "</div>" +
+        '<div class="chips">' +
+        (a.data_size ? '<span class="pill">' + fmtBytes(a.data_size) + " data</span>" : "") +
+        (a.mtx ? '<span class="pill">' + fmtBytes(a.mtx) + " cellular</span>" : "") +
+        (sideloaded ? '<span class="pill warn">not Play</span>' : "") + "</div>" +
+        (hot.length ? '<div class="perms">' + hot.map(function (p) {
+          return '<span class="perm hot">' + esc(p) + "</span>";
+        }).join("") + "</div>" : "") +
+        "</div></div>";
+    }).join("");
+    $("#applist").innerHTML = h ||
+      '<div class="empty">' + (q ? "nothing matches “" + esc(q) + "”" :
+        "no third-party apps found yet") + "</div>";
+    $$("#applist .approw").forEach(function (row) {
+      row.addEventListener("click", function () {
+        go("storage");
+        inspectApp(row.dataset.app);
+      });
+    });
+  }
+  $("#appsearch").addEventListener("input", renderApps);
+  $("#appsort").addEventListener("change", renderApps);
+
   /* ---------- alerts + rules ---------- */
+  var lastAlerts = [], alertSev = "all";
   function loadAlerts() {
     fetch(dq("/api/alerts?state=open")).then(function (r) { return r.json(); }).then(function (alerts) {
-      (alerts || []).forEach(function (a) {
+      lastAlerts = alerts || [];
+      lastAlerts.forEach(function (a) {
         if (a.data && a.data.ip) alertedIPs[a.data.ip] = 1;
       });
-      var h = (alerts || []).map(function (a) {
-        return '<div class="alertrow"><div class="ic alert" style="width:30px;height:30px;flex:0 0 30px">' +
-          icon("alert") + "</div>" +
-          '<div class="ab"><div class="at">' + esc(a.title) +
-          ' <span class="pill ' + (a.severity === "crit" ? "crit" : "warn") + '">' + esc(a.severity) + "</span></div>" +
-          (a.detail ? '<div class="ad">' + esc(a.detail) + "</div>" : "") +
-          '<div class="aa"><button class="btn p" data-ack="' + a.id + '">Acknowledge</button>' +
-          '<button class="btn" data-mute="' + a.id + '">Mute</button>' +
-          '<span style="margin-left:auto;font-size:11px;color:var(--fg-mut);font-family:var(--ff-mono)">' +
-          fmtTime(a.ts) + "</span></div></div></div>";
-      }).join("");
-      $("#alertlist").innerHTML = h || '<div class="empty">no open alerts</div>';
-      $("#monalerts").innerHTML = (alerts || []).slice(0, 5).map(function (a) {
-        return '<div class="ev"><div class="ic alert">' + icon("alert") +
-          '</div><div class="body"><div class="t1"><b>' + esc(a.title) +
-          '</b></div><div class="t2">' + esc(a.detail || a.rule) + "</div></div>" +
-          '<span class="pill ' + (a.severity === "crit" ? "crit" : "warn") + '">' +
-          esc(a.severity) + "</span></div>";
-      }).join("") || '<div class="empty">no open alerts</div>';
-      $$("#alertlist [data-ack], #alertlist [data-mute]").forEach(function (b) {
-        b.addEventListener("click", function () {
-          var id = b.dataset.ack || b.dataset.mute;
-          fetch("/api/alerts/" + id + "/state", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ state: b.dataset.ack ? "acked" : "muted" }),
-          }).then(function () { loadAlerts(); pollStatus(); });
-        });
-      });
+      renderAlerts();
     }).catch(function () {});
   }
+  function renderAlerts() {
+    var alerts = lastAlerts.filter(function (a) {
+      return alertSev === "all" || a.severity === alertSev;
+    });
+    var h = alerts.map(function (a) {
+      return '<div class="alertrow"><div class="ic alert" style="width:30px;height:30px;flex:0 0 30px">' +
+        icon("alert") + "</div>" +
+        '<div class="ab"><div class="at">' + esc(a.title) +
+        ' <span class="pill ' + (a.severity === "crit" ? "crit" : "warn") + '">' + esc(a.severity) + "</span>" +
+        (a.device ? ' <span class="pill mut">' + esc(shortApp(a.device)) + "</span>" : "") + "</div>" +
+        (a.detail ? '<div class="ad">' + esc(a.detail) + "</div>" : "") +
+        '<div class="aa"><button class="btn p" data-ack="' + a.id +
+        '" title="Mark as reviewed and remove from the open list">Acknowledge</button>' +
+        '<button class="btn" data-mute="' + a.id + '" title="Silence this alert">Mute</button>' +
+        '<span style="margin-left:auto;font-size:11px;color:var(--fg-mut);font-family:var(--ff-mono)">' +
+        fmtTime(a.ts) + "</span></div></div></div>";
+    }).join("");
+    $("#alertlist").innerHTML = h || '<div class="empty">' +
+      (alertSev === "all" ? "no open alerts — all clear" :
+        "no open " + esc(alertSev) + " alerts") + "</div>";
+    $("#monalerts").innerHTML = lastAlerts.slice(0, 5).map(function (a) {
+      return '<div class="ev"><div class="ic alert">' + icon("alert") +
+        '</div><div class="body"><div class="t1"><b>' + esc(a.title) +
+        '</b></div><div class="t2">' + esc(a.detail || a.rule) + "</div></div>" +
+        '<span class="pill ' + (a.severity === "crit" ? "crit" : "warn") + '">' +
+        esc(a.severity) + "</span></div>";
+    }).join("") || '<div class="empty">no open alerts</div>';
+    $$("#alertlist [data-ack], #alertlist [data-mute]").forEach(function (b) {
+      b.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var id = b.dataset.ack || b.dataset.mute;
+        var state = b.dataset.ack ? "acked" : "muted";
+        fetch("/api/alerts/" + id + "/state", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ state: state }),
+        }).then(function () {
+          toast(state === "acked" ? "Alert acknowledged" : "Alert muted", "good");
+          loadAlerts(); pollStatus();
+        });
+      });
+    });
+  }
+  $$("#alertsev button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      $$("#alertsev button").forEach(function (x) { x.classList.remove("on"); });
+      b.classList.add("on");
+      alertSev = b.dataset.asev;
+      renderAlerts();
+    });
+  });
   function loadRules() {
     fetch(dq("/api/rules")).then(function (r) { return r.json(); }).then(function (rules) {
       $("#rulelist").innerHTML = (rules || []).map(function (r) {
@@ -453,6 +542,8 @@
           fetch("/api/rules/" + t.dataset.rule, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ enabled: on }),
+          }).then(function () {
+            toast("Rule " + (on ? "enabled" : "disabled"), on ? "good" : "warn");
           });
         });
       });
@@ -465,28 +556,12 @@
   var FILE = '<svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v4h4"/></svg>';
   var LINKI = '<svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/></svg>';
 
+  var lastStorApps = [];
+  var storSort = { col: "data", dir: -1 };
   function loadStorage() {
     fetch(dq("/api/apps")).then(function (r) { return r.json(); }).then(function (apps) {
-      var rows = apps.slice().sort(function (a, b) {
-        return (b.data_size || 0) - (a.data_size || 0);
-      });
-      var tbody = $("#storagetbl tbody");
-      tbody.innerHTML = rows.map(function (a) {
-        return '<tr class="srow" data-pkg="' + esc(a.package) + '">' +
-          '<td><div style="font-weight:500">' + esc(shortApp(a.package)) + "</div>" +
-          '<div class="mono" style="font-size:11px;color:var(--fg-mut);overflow:hidden;text-overflow:ellipsis;max-width:200px;white-space:nowrap">' + esc(a.package) + "</div></td>" +
-          '<td class="mono tnum">' + fmtBytes(a.data_size) + "</td>" +
-          '<td class="mono tnum">' + fmtBytes(a.cache_size) + "</td>" +
-          '<td class="mono tnum">' + fmtBytes(a.apk_size) + "</td>" +
-          '<td><div class="act"><button class="btn" data-inspect="' + esc(a.package) + '">inspect</button>' +
-          '<button class="btn p" data-backup="' + esc(a.package) + '">extract</button></div></td></tr>';
-      }).join("") || '<tr><td colspan="5" class="empty">no app storage data yet (needs a device)</td></tr>';
-      $$("#storagetbl [data-inspect]").forEach(function (b) {
-        b.addEventListener("click", function () { inspectApp(b.dataset.inspect); });
-      });
-      $$("#storagetbl [data-backup]").forEach(function (b) {
-        b.addEventListener("click", function () { startBackup(b.dataset.backup); });
-      });
+      lastStorApps = apps || [];
+      renderStorageTable();
     }).catch(function () {});
 
     fetch(dq("/api/storage")).then(function (r) { return r.json(); }).then(function (s) {
@@ -539,15 +614,11 @@
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ apk: true, data: true, external: false }),
     }).then(function (r) { return r.json(); }).then(function (res) {
-      if (res.error) { alert2(res.error); return; }
-      alert2("Extract started for " + shortApp(pkg) + " — watch the Live feed; it appears under Backups when done.");
+      if (res.error) { toast(res.error, "warn"); return; }
+      toast("Extracting " + shortApp(pkg), "good",
+            "APK + data are being pulled; it appears under Backups when done");
       setTimeout(loadBackups, 3000);
-    }).catch(function () {});
-  }
-
-  function alert2(msg) {
-    var r = $("#ev-result");
-    if (r) { r.textContent = msg; }
+    }).catch(function () { toast("extract request failed", "crit"); });
   }
 
   function loadBackups() {
@@ -694,10 +765,15 @@
       return r.json().then(function (j) { return { ok: r.ok, j: j }; });
     }).then(function (res) {
       var j = res.j || {};
-      if (out) out.textContent = (j.ok === false ? ("error: " + (j.error || "failed")) : (j.output || "done"));
+      var msg = j.ok === false ? ("error: " + (j.error || "failed")) : (j.output || "done");
+      if (out) out.textContent = msg;
+      toast(j.ok === false ? msg : "ADB: " + msg.split("\n")[0], j.ok === false ? "warn" : "good");
       setTimeout(pollDevices, 900);
       return res;
-    }).catch(function () { if (out) out.textContent = "request failed"; });
+    }).catch(function () {
+      if (out) out.textContent = "request failed";
+      toast("ADB request failed", "crit");
+    });
   }
 
   (function wireAdb() {
@@ -719,6 +795,263 @@
       adbPost("/api/adb/connect", { host_port: $("#conn-hp").value.trim() }, "#adb-out2");
     });
   })();
+
+  /* ================= product polish ================= */
+
+  /* ---- toasts ---- */
+  function toast(msg, cls, meta) {
+    var box = $("#toasts");
+    if (!box) return;
+    var el = document.createElement("div");
+    el.className = "toast " + (cls || "");
+    el.innerHTML = esc(msg) + (meta ? '<div class="tmeta">' + esc(meta) + "</div>" : "");
+    box.appendChild(el);
+    setTimeout(function () {
+      el.style.opacity = "0";
+      el.style.transition = "opacity .3s";
+      setTimeout(function () { el.remove(); }, 350);
+    }, 4200);
+  }
+
+  /* ---- global search: filters whatever the current tab shows ---- */
+  function gQuery() {
+    var el = $("#gsearch");
+    return el ? (el.value || "").trim().toLowerCase() : "";
+  }
+  var ROW_SEL = ".ev, .approw, .logln, .alertrow, .devrow, .fentry, tbody tr";
+  function applyGlobalSearch() {
+    var panel = $('.panel[data-panel="' + currentTab + '"]');
+    if (!panel) return;
+    var q = gQuery();
+    $$(ROW_SEL, panel).forEach(function (row) {
+      if (row.querySelector(".empty") || row.classList.contains("empty")) return;
+      var id = (row.closest(".feed") || {}).id || "";
+      row.style.display = rowMatchesFilters(row, id) ? "" : "none";
+    });
+    void q;
+  }
+  $("#gsearch").addEventListener("input", applyGlobalSearch);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "/" && !/input|select|textarea/i.test((document.activeElement || {}).tagName || "")) {
+      e.preventDefault();
+      $("#gsearch").focus();
+    }
+    if (e.key === "Escape" && document.activeElement === $("#gsearch")) {
+      $("#gsearch").value = "";
+      applyGlobalSearch();
+      $("#gsearch").blur();
+    }
+  });
+  setInterval(function () { if (gQuery()) applyGlobalSearch(); }, 1200);
+
+  /* ---- monitor severity chips ---- */
+  $$("#sevchips button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      $$("#sevchips button").forEach(function (x) { x.classList.remove("on"); });
+      b.classList.add("on");
+      sevFilter = b.dataset.sev;
+      $$("#feed-mon .ev").forEach(function (row) { applyRowFilters(row, "feed-mon"); });
+    });
+  });
+
+  /* ---- generic sortable table headers ---- */
+  function wireSortable(tableSel, state, rerender) {
+    $$(tableSel + " th.sortable").forEach(function (th) {
+      th.addEventListener("click", function () {
+        var col = th.dataset.col;
+        if (state.col === col) state.dir = -state.dir;
+        else { state.col = col; state.dir = th.dataset.num ? -1 : 1; }
+        rerender();
+      });
+    });
+  }
+  function paintSortArrows(tableSel, state) {
+    $$(tableSel + " th.sortable").forEach(function (th) {
+      var arr = th.querySelector(".arr");
+      if (!arr) {
+        arr = document.createElement("span");
+        arr.className = "arr";
+        th.appendChild(arr);
+      }
+      arr.textContent = th.dataset.col === state.col ? (state.dir > 0 ? "▴" : "▾") : "";
+    });
+  }
+  function cmpBy(state, getters) {
+    var get = getters[state.col] || function () { return ""; };
+    return function (a, b) {
+      var x = get(a), y = get(b);
+      if (typeof x === "string") return state.dir * x.localeCompare(String(y));
+      return state.dir * ((x || 0) - (y || 0));
+    };
+  }
+
+  /* ---- per-app storage table (sortable, clickable rows) ---- */
+  function renderStorageTable() {
+    var rows = lastStorApps.slice().sort(cmpBy(storSort, {
+      name: function (a) { return shortApp(a.package).toLowerCase(); },
+      data: function (a) { return a.data_size || 0; },
+      cache: function (a) { return a.cache_size || 0; },
+      apk: function (a) { return a.apk_size || 0; },
+    }));
+    paintSortArrows("#storagetbl", storSort);
+    $("#storagetbl tbody").innerHTML = rows.map(function (a) {
+      return '<tr class="srow rowlink" data-pkg="' + esc(a.package) +
+        '" title="Click to inspect where this app stores its data and logs">' +
+        '<td><div style="font-weight:500">' + esc(shortApp(a.package)) + "</div>" +
+        '<div class="mono" style="font-size:11px;color:var(--fg-mut);overflow:hidden;text-overflow:ellipsis;max-width:200px;white-space:nowrap">' + esc(a.package) + "</div></td>" +
+        '<td class="mono tnum">' + fmtBytes(a.data_size) + "</td>" +
+        '<td class="mono tnum">' + fmtBytes(a.cache_size) + "</td>" +
+        '<td class="mono tnum">' + fmtBytes(a.apk_size) + "</td>" +
+        '<td><div class="act"><button class="btn" data-inspect="' + esc(a.package) +
+        '" title="Show data directories, sizes and log files">inspect</button>' +
+        '<button class="btn p" data-backup="' + esc(a.package) +
+        '" title="Pull the APK and its data to this computer">extract</button></div></td></tr>';
+    }).join("") || '<tr><td colspan="5" class="empty">no app storage data yet (needs a device)</td></tr>';
+    $$("#storagetbl [data-inspect]").forEach(function (b) {
+      b.addEventListener("click", function (e) { e.stopPropagation(); inspectApp(b.dataset.inspect); });
+    });
+    $$("#storagetbl [data-backup]").forEach(function (b) {
+      b.addEventListener("click", function (e) { e.stopPropagation(); startBackup(b.dataset.backup); });
+    });
+    $$("#storagetbl tbody tr.rowlink").forEach(function (tr) {
+      tr.addEventListener("click", function () { inspectApp(tr.dataset.pkg); });
+    });
+    applyGlobalSearch();
+  }
+  wireSortable("#storagetbl", storSort, renderStorageTable);
+
+  /* ---- top destinations table (sortable, click to filter) ---- */
+  var destSort = { col: "count", dir: -1 };
+  function renderDestTable() {
+    var rows = Object.keys(destStats).map(function (k) { return destStats[k]; });
+    if (!rows.length) return;
+    rows.sort(cmpBy(destSort, {
+      host: function (d) { return (d.label || "").toLowerCase(); },
+      count: function (d) { return d.count || 0; },
+      tracker: function (d) { return d.tracker || ""; },
+      last: function (d) { return d.last || 0; },
+    }));
+    paintSortArrows("#desttbl", destSort);
+    $("#desttbl tbody").innerHTML = rows.slice(0, 80).map(function (d) {
+      return '<tr class="rowlink" data-host="' + esc(d.label) +
+        '" title="Click to filter the connection feed to this destination">' +
+        '<td class="mono" style="font-size:12px;word-break:break-all">' + esc(d.label) +
+        (d.alerted ? ' <span class="pill crit">alerted</span>' : "") + "</td>" +
+        '<td class="mono tnum">' + d.count + "</td>" +
+        "<td>" + (d.tracker ? '<span class="pill info">' + esc(d.tracker) + "</span>"
+          : '<span style="color:var(--fg-mut)">—</span>') + "</td>" +
+        '<td class="mono tnum">' + fmtTime(d.last) + "</td></tr>";
+    }).join("");
+    $$("#desttbl tbody tr").forEach(function (tr) {
+      tr.addEventListener("click", function () {
+        $("#gsearch").value = tr.dataset.host;
+        applyGlobalSearch();
+        toast("Filtering to " + tr.dataset.host, "", "clear the search box to see everything again");
+      });
+    });
+    applyGlobalSearch();
+  }
+  wireSortable("#desttbl", destSort, renderDestTable);
+
+  /* ---- click a feed row -> open that app ---- */
+  ["#feed-mon", "#feed-net", "#feed-priv"].forEach(function (sel) {
+    var el = $(sel);
+    if (!el) return;
+    el.addEventListener("click", function (e) {
+      var row = e.target.closest(".ev[data-app]");
+      if (!row) return;
+      var app = row.dataset.app;
+      go("apps");
+      $("#appsearch").value = app;
+      renderApps();
+      toast("Showing " + shortApp(app), "", "clear the filter box to see all apps");
+    });
+  });
+
+  /* ---- draggable layout + collapsible cards (persisted) ---- */
+  function keyOf(el, i) {
+    if (el.id) return el.id;
+    var idEl = el.querySelector("[id]");
+    if (idEl) return "k-" + idEl.id;
+    var h = el.querySelector(".ch h3");
+    if (h) return "h-" + h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30);
+    return "i-" + i;
+  }
+  function loadJSON(key, fallback) {
+    try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch (e) { return fallback; }
+  }
+  function saveJSON(key, val) {
+    try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
+  }
+  var layout = loadJSON("sentinel-layout", {});
+  var collapsed = loadJSON("sentinel-collapsed", {});
+  var draggedEl = null;
+
+  function initDragZones() {
+    $$(".panel").forEach(function (panel) {
+      $$(".grid.tiles, .cols, .cols3", panel).forEach(function (zone, zi) {
+        var zoneKey = panel.dataset.panel + ":" + zi;
+        var kids = Array.prototype.slice.call(zone.children);
+        // restore saved order
+        var saved = layout[zoneKey];
+        if (saved && saved.length) {
+          var byKey = {};
+          kids.forEach(function (k, i) { byKey[keyOf(k, i)] = k; });
+          saved.forEach(function (k) { if (byKey[k]) zone.appendChild(byKey[k]); });
+        }
+        Array.prototype.slice.call(zone.children).forEach(function (child, ci) {
+          var handle = document.createElement("div");
+          handle.className = "dragh";
+          handle.textContent = "⠿";
+          handle.title = "Drag to rearrange this panel";
+          child.style.position = "relative";
+          child.appendChild(handle);
+          handle.addEventListener("mousedown", function () { child.draggable = true; });
+          child.addEventListener("dragstart", function (e) {
+            draggedEl = child;
+            child.classList.add("dragging");
+            try { e.dataTransfer.setData("text/plain", ""); } catch (err) {}
+            e.dataTransfer.effectAllowed = "move";
+          });
+          child.addEventListener("dragend", function () {
+            child.classList.remove("dragging");
+            child.draggable = false;
+            draggedEl = null;
+            layout[zoneKey] = Array.prototype.slice.call(zone.children)
+              .map(function (k, i) { return keyOf(k, i); });
+            saveJSON("sentinel-layout", layout);
+          });
+          child.addEventListener("dragover", function (e) {
+            if (!draggedEl || draggedEl === child || draggedEl.parentNode !== zone) return;
+            e.preventDefault();
+            var order = Array.prototype.slice.call(zone.children);
+            if (order.indexOf(draggedEl) < order.indexOf(child)) child.after(draggedEl);
+            else child.before(draggedEl);
+          });
+          void ci;
+        });
+      });
+      // collapsible cards: any card with a header gets a collapser
+      $$(".card", panel).forEach(function (card, ci) {
+        var ch = card.querySelector(":scope > .ch");
+        if (!ch || ch.querySelector(".collapser")) return;
+        var ckey = "c:" + panel.dataset.panel + ":" + keyOf(card, ci);
+        var btn = document.createElement("button");
+        btn.className = "collapser";
+        btn.title = "Collapse / expand";
+        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>';
+        ch.appendChild(btn);
+        if (collapsed[ckey]) card.classList.add("collapsed");
+        btn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          card.classList.toggle("collapsed");
+          collapsed[ckey] = card.classList.contains("collapsed");
+          saveJSON("sentinel-collapsed", collapsed);
+        });
+      });
+    });
+  }
+  initDragZones();
 
   /* ---------- initial feed backfill ---------- */
   // Buffer live WS events until the backfill has rendered, then replay them,

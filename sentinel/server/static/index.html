@@ -55,7 +55,12 @@
 
     <div class="topbar">
       <div><h2 id="ttl">Live Activity</h2><div class="sub" id="sub">Unified timeline of everything the device is doing</div></div>
-      <select id="devpick" class="devpick" title="Monitored device" aria-label="Select device"></select>
+      <div class="gsearch" style="margin-left:auto">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="gsearch" type="search" placeholder="Search this tab" autocomplete="off" spellcheck="false" aria-label="Search current tab">
+        <kbd>/</kbd>
+      </div>
+      <select id="devpick" class="devpick" style="margin-left:0" title="Monitored device" aria-label="Select device"></select>
       <div class="live off" id="wsstate"><span class="dot"></span><span id="wstext">CONNECTING</span></div>
       <button class="iconbtn" id="theme" title="Toggle theme" aria-label="Toggle theme">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19"/></svg>
@@ -66,15 +71,21 @@
       <!-- MONITOR -->
       <section class="panel on" data-panel="monitor">
         <div class="grid tiles">
-          <div class="card tile"><div class="k">Open alerts</div><div class="v tnum" id="t-alerts">0</div><div class="d">needs review</div></div>
-          <div class="card tile"><div class="k">Mic / cam now</div><div class="v tnum" id="t-sensors">—</div><div class="d" id="t-sensors-d">idle</div></div>
-          <div class="card tile"><div class="k">Live connections</div><div class="v tnum" id="t-conns">0</div><div class="d" id="t-transport">—</div></div>
-          <div class="card tile"><div class="k">Hostnames cached</div><div class="v tnum" id="t-hosts">0</div><div class="d" id="t-capture">capture off</div></div>
-          <div class="card tile"><div class="k">God-mode apps</div><div class="v tnum" id="t-god">0</div><div class="d">a11y · admin · notif</div></div>
+          <div class="card tile" data-tip="Detections that fired and are not yet acknowledged. Review them in the Alerts tab."><div class="k">Open alerts</div><div class="v tnum" id="t-alerts">0</div><div class="d">needs review</div></div>
+          <div class="card tile" data-tip="Apps holding the camera or microphone at this moment, read live from the device's camera and audio services."><div class="k">Mic / cam now</div><div class="v tnum" id="t-sensors">—</div><div class="d" id="t-sensors-d">idle</div></div>
+          <div class="card tile" data-tip="Open network sockets at the last poll, attributed per app. The label shows which path traffic takes: WiFi, cellular or VPN."><div class="k">Live connections</div><div class="v tnum" id="t-conns">0</div><div class="d" id="t-transport">—</div></div>
+          <div class="card tile" data-tip="Names learned from DNS answers and TLS handshakes. This is how destinations get names instead of bare IPs, with no decryption."><div class="k">Hostnames cached</div><div class="v tnum" id="t-hosts">0</div><div class="d" id="t-capture">capture off</div></div>
+          <div class="card tile" data-tip="Apps holding Accessibility, Device admin or Notification access: the three permissions spyware abuses most. Review every one."><div class="k">God-mode apps</div><div class="v tnum" id="t-god">0</div><div class="d">a11y · admin · notif</div></div>
         </div>
         <div class="cols" style="margin-top:14px">
           <div class="card pad0">
-            <div class="ch"><h3>Unified activity feed</h3><span class="hint">sensors · network · apps · threats</span></div>
+            <div class="ch"><h3>Unified activity feed</h3><span class="tiphint" data-tip="Every signal from the device merged into one timeline: sensor access, network connections, app changes and threats. Click a row to jump to that app.">?</span>
+              <div class="chips-filter" id="sevchips">
+                <button class="on" data-sev="all">all</button>
+                <button data-sev="notice">notable</button>
+                <button data-sev="warn">warnings</button>
+              </div>
+            </div>
             <div class="feed" id="feed-mon"><div class="empty">waiting for events…</div></div>
           </div>
           <div style="display:flex;flex-direction:column;gap:14px">
@@ -108,12 +119,27 @@
         </div>
         <div class="cols" style="margin-top:14px">
           <div class="card pad0">
-            <div class="ch"><h3>Live connections</h3><span class="hint">socket → UID → app</span></div>
+            <div class="ch"><h3>Live connections</h3><span class="tiphint" data-tip="Open sockets read from the device's connection table, attributed to the owning app by its UID. Click a row to jump to that app.">?</span><span class="hint">socket → UID → app</span></div>
             <div class="feed" id="feed-net"><div class="empty">no connections yet</div></div>
           </div>
           <div class="card pad0">
-            <div class="ch"><h3>Egress by app</h3><span class="hint" id="egresshint">wifi + cellular</span></div>
+            <div class="ch"><h3>Egress by app</h3><span class="tiphint" data-tip="Bytes each app has sent, split by path: top bar over WiFi, bottom bar over cellular (your data plan). From the system's per-app traffic counters.">?</span><span class="hint" id="egresshint">wifi + cellular</span></div>
             <div id="egress" style="padding:6px 0"><div class="empty">waiting for netstats…</div></div>
+          </div>
+        </div>
+
+        <div class="card pad0" style="margin-top:14px">
+          <div class="ch"><h3>Top destinations</h3><span class="tiphint" data-tip="Every hostname or IP this device has contacted this session, with how often. Click a column header to sort; click a row to filter the connection feed to it.">?</span><span class="hint">click headers to sort</span></div>
+          <div class="tblwrap" style="max-height:340px">
+            <table id="desttbl">
+              <thead><tr>
+                <th class="sortable" data-col="host">Destination</th>
+                <th class="sortable" data-col="count" data-num="1">Connections</th>
+                <th class="sortable" data-col="tracker">Tracker</th>
+                <th class="sortable" data-col="last" data-num="1">Last seen</th>
+              </tr></thead>
+              <tbody><tr><td colspan="4" class="empty">destinations appear as traffic flows</td></tr></tbody>
+            </table>
           </div>
         </div>
       </section>
@@ -130,12 +156,22 @@
       <!-- APPS -->
       <section class="panel" data-panel="apps">
         <div class="grid tiles">
-          <div class="card tile"><div class="k">Third-party apps</div><div class="v tnum" id="t-apps">0</div><div class="d">monitored</div></div>
-          <div class="card tile"><div class="k">God-mode holders</div><div class="v tnum" id="t-god2">0</div><div class="d">review these first</div></div>
-          <div class="card tile"><div class="k">Sideloaded</div><div class="v tnum" id="t-side">0</div><div class="d">not from Play</div></div>
+          <div class="card tile" data-tip="Apps installed on top of the system image. System apps are not listed."><div class="k">Third-party apps</div><div class="v tnum" id="t-apps">0</div><div class="d">monitored</div></div>
+          <div class="card tile" data-tip="Apps with Accessibility, Device admin or Notification access. These deserve a look even when they seem legitimate."><div class="k">God-mode holders</div><div class="v tnum" id="t-god2">0</div><div class="d">review these first</div></div>
+          <div class="card tile" data-tip="Installed from outside a trusted store. Not bad by itself, but it is how stalkerware usually arrives."><div class="k">Sideloaded</div><div class="v tnum" id="t-side">0</div><div class="d">not from Play</div></div>
         </div>
         <div class="card pad0" style="margin-top:14px">
-          <div class="ch"><h3>Installed apps</h3><span class="hint">sorted by risk, then egress</span></div>
+          <div class="ch"><h3>Installed apps</h3><span class="tiphint" data-tip="Every third-party app with its risk score (0-100), install source, dangerous permissions and data use. Click an app to inspect where it stores its files. The score blends god-mode access, dangerous permissions, sideloading and cellular egress.">?</span><span class="hint">click an app to inspect it</span></div>
+          <div class="toolbar">
+            <input id="appsearch" type="search" placeholder="Filter by name, package or permission…" autocomplete="off">
+            <select id="appsort" aria-label="Sort apps">
+              <option value="risk">sort: risk</option>
+              <option value="name">sort: name</option>
+              <option value="data">sort: data size</option>
+              <option value="cell">sort: cellular egress</option>
+              <option value="tx">sort: total egress</option>
+            </select>
+          </div>
           <div class="applist" id="applist"><div class="empty">inventory loads on first package poll…</div></div>
         </div>
       </section>
@@ -190,16 +226,21 @@
       <!-- FILES & STORAGE -->
       <section class="panel" data-panel="storage">
         <div class="grid tiles">
-          <div class="card tile"><div class="k">App data on device</div><div class="v tnum" id="t-appdata">—</div><div class="d">across all apps</div></div>
-          <div class="card tile"><div class="k">Data free</div><div class="v tnum" id="t-datafree">—</div><div class="d" id="t-cachefree">—</div></div>
-          <div class="card tile"><div class="k">Backups taken</div><div class="v tnum" id="t-backups">0</div><div class="d">on this computer</div></div>
+          <div class="card tile" data-tip="Code plus data across all apps, from the system's disk statistics."><div class="k">App data on device</div><div class="v tnum" id="t-appdata">—</div><div class="d">across all apps</div></div>
+          <div class="card tile" data-tip="Free space in the data partition, as the device reports it."><div class="k">Data free</div><div class="v tnum" id="t-datafree">—</div><div class="d" id="t-cachefree">—</div></div>
+          <div class="card tile" data-tip="App extractions saved on this computer under ~/.android-sentinel/backups."><div class="k">Backups taken</div><div class="v tnum" id="t-backups">0</div><div class="d">on this computer</div></div>
         </div>
 
         <div class="cols" style="margin-top:14px">
           <div class="card pad0">
             <div class="ch"><h3>Per-app storage</h3><span class="hint">data · cache · APK, with extract / backup</span></div>
             <div class="tblwrap" style="max-height:460px">
-              <table id="storagetbl"><thead><tr><th>App</th><th>Data</th><th>Cache</th><th>APK</th><th></th></tr></thead><tbody><tr><td colspan="5" class="empty">loading storage overview…</td></tr></tbody></table>
+              <table id="storagetbl"><thead><tr>
+                <th class="sortable" data-col="name">App</th>
+                <th class="sortable" data-col="data" data-num="1">Data</th>
+                <th class="sortable" data-col="cache" data-num="1">Cache</th>
+                <th class="sortable" data-col="apk" data-num="1">APK</th>
+                <th></th></tr></thead><tbody><tr><td colspan="5" class="empty">loading storage overview…</td></tr></tbody></table>
             </div>
           </div>
           <div class="card pad0">
@@ -248,7 +289,13 @@
       <section class="panel" data-panel="alerts">
         <div class="cols">
           <div class="card pad0">
-            <div class="ch"><h3>Triggered alerts</h3><span class="hint">newest first</span></div>
+            <div class="ch"><h3>Triggered alerts</h3><span class="tiphint" data-tip="Detections that fired on this device. Acknowledge removes one from the open list; Mute silences it. Critical means act now; warning means review when you can.">?</span>
+              <div class="chips-filter" id="alertsev">
+                <button class="on" data-asev="all">all</button>
+                <button data-asev="crit">critical</button>
+                <button data-asev="warn">warning</button>
+              </div>
+            </div>
             <div id="alertlist"><div class="empty">no open alerts</div></div>
           </div>
           <div class="card pad0">
@@ -261,9 +308,9 @@
       <!-- DEVICES & ADB -->
       <section class="panel" data-panel="devices">
         <div class="grid tiles">
-          <div class="card tile"><div class="k">Monitored now</div><div class="v tnum" id="t-mon">0</div><div class="d">USB + wireless, no limit</div></div>
-          <div class="card tile"><div class="k">Seen by ADB</div><div class="v tnum" id="t-seen">0</div><div class="d" id="t-notready">all ready</div></div>
-          <div class="card tile"><div class="k">ADB server</div><div class="v" id="t-adbver" style="font-size:15px;font-family:var(--ff-mono)">—</div><div class="d">on this computer</div></div>
+          <div class="card tile" data-tip="Devices with live collectors attached. USB and wireless count equally; there is no limit."><div class="k">Monitored now</div><div class="v tnum" id="t-mon">0</div><div class="d">USB + wireless, no limit</div></div>
+          <div class="card tile" data-tip="Everything adb lists, including devices that are not ready yet. Each row below explains its state."><div class="k">Seen by ADB</div><div class="v tnum" id="t-seen">0</div><div class="d" id="t-notready">all ready</div></div>
+          <div class="card tile" data-tip="The local adb daemon this dashboard drives. Restart it when a device sticks on offline."><div class="k">ADB server</div><div class="v" id="t-adbver" style="font-size:15px;font-family:var(--ff-mono)">—</div><div class="d">on this computer</div></div>
         </div>
 
         <div class="card pad0" style="margin-top:14px">
@@ -308,6 +355,7 @@
     </div>
   </div>
 </div>
+<div id="toasts" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

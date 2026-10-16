@@ -8,6 +8,7 @@ offline, no permissions) are kept in hub.listing so the UI can explain them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from .adb.device import device_info
@@ -99,6 +100,11 @@ class DeviceManager:
         dctx = self.hub.devices.pop(serial, None)
         if not dctx:
             return
+        # persist the learned-destinations baseline before dropping the device,
+        # so a reconnect does not re-fire "new country" for countries it knew
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(dctx.store.put_snapshot, "seen_countries",
+                                    dctx.rules.export_seen_countries())
         for t in dctx.tasks:
             t.cancel()
         await asyncio.gather(*dctx.tasks, return_exceptions=True)

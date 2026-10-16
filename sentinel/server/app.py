@@ -321,7 +321,9 @@ def create_app(cfg: Config) -> FastAPI:
     def devices():
         """Everything adb sees (incl. unauthorized/offline, with why) plus the
         devices actively monitored."""
-        monitored = {s: d.summary() for s, d in hub.devices.items()}
+        # snapshot the registry: DeviceManager mutates it on the event loop
+        # while this handler runs in a worker thread
+        monitored = {s: d.summary() for s, d in list(hub.devices.items())}
         listing = []
         for row in hub.listing:
             s = row["serial"]
@@ -472,13 +474,15 @@ def create_app(cfg: Config) -> FastAPI:
     @app.post("/api/rules/{rule_id}")
     def toggle_rule(rule_id: str, body: dict):
         on = bool(body.get("enabled", True))
-        ok = False
-        for dctx in hub.devices.values():     # rule toggles apply to every device
-            ok = dctx.rules.set_enabled(rule_id, on) or ok
-        hub.store.put_snapshot("rules_enabled",
-                               {rid: on for rid in [rule_id]} if not hub.devices
-                               else next(iter(hub.devices.values())).rules.enabled_map())
-        return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
+        if rule_id not in RulesEngine().rules:   # validate against the catalog
+            return JSONResponse({"ok": False, "error": "unknown rule"}, status_code=404)
+        for dctx in list(hub.devices.values()):  # applies to every attached device
+            dctx.rules.set_enabled(rule_id, on)
+        # merge into the persisted map so other rules' states are never clobbered
+        m = hub.store.get_snapshot("rules_enabled") or {}
+        m[rule_id] = on
+        hub.store.put_snapshot("rules_enabled", m)
+        return {"ok": True, "devices": len(hub.devices)}
 
     # ---------- storage / files / backup ----------
     @app.get("/api/storage")
@@ -512,7 +516,11 @@ def create_app(cfg: Config) -> FastAPI:
                              {"apk": bool(body.get("apk", True)),
                               "data": bool(body.get("data", True)),
                               "external": bool(body.get("external", False))})
-        asyncio.create_task(asyncio.to_thread(backup.run, dctx, job))
+        # track the task so it is not GC'd mid-run and is torn down on
+        # device disconnect / server shutdown
+        task = asyncio.create_task(asyncio.to_thread(backup.run, dctx, job))
+        dctx.tasks.append(task)
+        task.add_done_callback(lambda t: t in dctx.tasks and dctx.tasks.remove(t))
         return {"job": job["id"], "pkg": pkg, "serial": dctx.serial, "state": job["state"]}
 
     @app.get("/api/backup/jobs")
@@ -523,8 +531,15 @@ def create_app(cfg: Config) -> FastAPI:
     def backups(device: str | None = None):
         return backup.list_backups(serial=device)
 
-    @app.get("/api/export/evidence")
-    def export_evidence(hours: float = 24.0, device: str | None = None):
+    @app.post("/api/export/evidence")
+    def export_evidence(body: dict | None = None):
+        # POST (not GET) so the CSRF guard covers it: it writes files to disk
+        body = body or {}
+        try:
+            hours = float(body.get("hours", 24.0))
+        except (TypeError, ValueError):
+            hours = 24.0
+        device = body.get("device")
         serial = device if device else hub.default_serial()
         return _export_evidence(hub, serial, hours)
 

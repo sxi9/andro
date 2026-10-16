@@ -600,7 +600,10 @@
   $("#ev-go").addEventListener("click", function () {
     var hours = $("#ev-hours").value;
     $("#ev-result").textContent = "exporting…";
-    fetch(dq("/api/export/evidence?hours=" + hours)).then(function (r) { return r.json(); })
+    fetch("/api/export/evidence", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hours: Number(hours), device: DEV }),
+    }).then(function (r) { return r.json(); })
       .then(function (d) {
         $("#ev-result").innerHTML = "Saved " + d.alerts + " alerts, " + d.events +
           " events.<br>" + esc(d.path) + "<br>sha256 " + esc((d.sha256 || "").slice(0, 16)) + "…";

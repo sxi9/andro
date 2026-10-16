@@ -31,10 +31,18 @@ if (Test-Path (Join-Path $PSScriptRoot "sentinel\__main__.py")) {
     git clone -b $Branch $Repo $Dir
 }
 
+# Python refuses to create a venv in a path containing ';' (the PATH
+# separator). Fall back to a safe location while the code stays put.
+$VenvRoot = $Dir
+if ($Dir -match ';') {
+    $VenvRoot = Join-Path $env:LOCALAPPDATA "android-sentinel"
+    New-Item -ItemType Directory -Force -Path $VenvRoot | Out-Null
+    Say "checkout path contains ';' — venv goes to $VenvRoot instead"
+}
 Say "creating virtualenv"
-python -m venv (Join-Path $Dir ".venv")
-$pip = Join-Path $Dir ".venv\Scripts\pip.exe"
-$python = Join-Path $Dir ".venv\Scripts\python.exe"
+python -m venv (Join-Path $VenvRoot ".venv")
+$pip = Join-Path $VenvRoot ".venv\Scripts\pip.exe"
+$python = Join-Path $VenvRoot ".venv\Scripts\python.exe"
 & $pip install --quiet --upgrade pip
 Say "installing dependencies"
 & $pip install --quiet -r (Join-Path $Dir "requirements.txt")
@@ -53,15 +61,17 @@ real device (demo mode works without it). Get it:
 Say "done."
 Write-Host @"
 
-Run it:
-  $python -m sentinel --demo     # simulated device, try the UI
-  $python -m sentinel            # phone on USB debugging
-  $python -m sentinel -s IP:PORT # wireless debugging
+Run it (from the checkout folder):
+  cd "$Dir"
+  & "$python" -m sentinel --demo     # simulated device, try the UI
+  & "$python" -m sentinel            # phone on USB debugging
+  & "$python" -m sentinel -s IP:PORT # wireless debugging
 
 Dashboard: http://127.0.0.1:8765  (local-only by design)
 "@
 
 if ($Demo) {
     Say "starting demo mode"
+    Set-Location $Dir
     & $python -m sentinel --demo
 }

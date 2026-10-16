@@ -41,13 +41,23 @@ else
   git clone -b "$BRANCH" "$REPO" "$DIR"
 fi
 
+# Python refuses to create a venv in a path containing ':' (the PATH
+# separator on POSIX). Fall back to a safe location while the code stays put.
+VENV_ROOT="$DIR"
+case "$DIR" in *:*)
+  VENV_ROOT="$HOME/.local/share/android-sentinel"
+  mkdir -p "$VENV_ROOT"
+  say "checkout path contains ':' — venv goes to $VENV_ROOT instead"
+;; esac
+
 say "creating virtualenv"
-python3 -m venv "$DIR/.venv" 2>/dev/null || {
+python3 -m venv "$VENV_ROOT/.venv" 2>/dev/null || {
   fail "python3 -m venv failed — on Debian/Ubuntu: sudo apt install python3-venv, then re-run"
 }
-"$DIR/.venv/bin/pip" install --quiet --upgrade pip
+PY="$VENV_ROOT/.venv/bin/python"
+"$VENV_ROOT/.venv/bin/pip" install --quiet --upgrade pip
 say "installing dependencies"
-"$DIR/.venv/bin/pip" install --quiet -r "$DIR/requirements.txt"
+"$VENV_ROOT/.venv/bin/pip" install --quiet -r "$DIR/requirements.txt"
 
 if command -v adb >/dev/null; then
   say "adb found: $(adb version 2>/dev/null | head -1)"
@@ -65,15 +75,17 @@ fi
 say "done."
 cat <<EOT
 
-Run it:
-  $DIR/.venv/bin/python -m sentinel --demo     # simulated device, try the UI
-  $DIR/.venv/bin/python -m sentinel            # phone on USB debugging
-  $DIR/.venv/bin/python -m sentinel -s IP:PORT # wireless debugging
+Run it (from the checkout folder):
+  cd "$DIR"
+  "$PY" -m sentinel --demo     # simulated device, try the UI
+  "$PY" -m sentinel            # phone on USB debugging
+  "$PY" -m sentinel -s IP:PORT # wireless debugging
 
 Dashboard: http://127.0.0.1:8765  (local-only by design)
 EOT
 
 if [ "$START_DEMO" = "1" ]; then
   say "starting demo mode"
-  exec "$DIR/.venv/bin/python" -m sentinel --demo
+  cd "$DIR"
+  exec "$PY" -m sentinel --demo
 fi

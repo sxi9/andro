@@ -588,7 +588,11 @@ def create_app(cfg: Config) -> FastAPI:
         except ValueError:
             return False
         hname = (u.hostname or "").lower()
-        return u.scheme == "http" and hname in _local_hosts and (hname, port) == _authority(host)
+        if u.scheme != "http" or hname not in _local_hosts:
+            return False
+        if not host:   # no Host header (not a browser): fall back to our own bind port
+            return port == cfg.port
+        return (hname, port) == _authority(host)
 
     @app.middleware("http")
     async def _csrf_guard(request, call_next):

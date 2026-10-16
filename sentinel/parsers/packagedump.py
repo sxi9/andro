@@ -7,7 +7,7 @@ from typing import Any
 _PM_LINE = re.compile(
     r"^package:(?:(?P<path>.+?)=)?(?P<pkg>[A-Za-z0-9_.]+)"
     r"(?:\s+installer=(?P<inst>\S+))?"
-    r"(?:\s+uid:(?P<uid>\d+))?\s*$"
+    r"(?:\s+uid:(?P<uid>\d+(?:,\d+)*))?\s*$"   # Android 13+ lists every user: uid:10146,1010146
 )
 
 
@@ -21,10 +21,12 @@ def parse_pm_list(text: str) -> dict[str, dict[str, Any]]:
         inst = m["inst"]
         if inst in ("null", ""):
             inst = None
+        uids = [int(u) for u in m["uid"].split(",")] if m["uid"] else []
         out[m["pkg"]] = {
             "path": m["path"],
             "installer": inst,
-            "uid": int(m["uid"]) if m["uid"] else None,
+            "uid": uids[0] if uids else None,   # owner's uid first; work-profile uids follow
+            "uids": uids,
         }
     return out
 

@@ -564,3 +564,30 @@ def test_appmanager_reinstall_and_user_scoping():
     assert "--user 10" in c.adb.last
     r = appmanager.run_action(c, "uninstall", {"package": "com.x", "user": "9999", "confirm": True})
     assert r["ok"] is False and "user" in r["output"]
+
+
+def test_pm_list_android13_multi_user_uid_lines():
+    """Since Android 13 a bare `pm list packages -U` walks every user and
+    joins their uids with commas; such lines must not be dropped."""
+    from sentinel.parsers.packagedump import parse_pm_list
+    out = ("package:/product/app/Chrome/Chrome.apk=com.android.chrome installer=null uid:10146,1010146\n"
+           "package:/data/app/~~x/com.a-y/base.apk=com.a installer=com.android.vending uid:10201\n")
+    rows = parse_pm_list(out)
+    assert set(rows) == {"com.android.chrome", "com.a"}
+    assert rows["com.android.chrome"]["uid"] == 10146
+    assert rows["com.android.chrome"]["uids"] == [10146, 1010146]
+    assert rows["com.a"]["uids"] == [10201]
+
+
+def test_uid_map_maps_every_user_uid():
+    from sentinel.adb.device import DeviceMaps
+
+    class A:
+        def shell_sync(self, cmd, su=False, timeout=25):
+            assert cmd == "pm list packages -U"
+            return "package:com.android.chrome uid:10146,1010146\npackage:com.a uid:10201\n"
+    m = DeviceMaps(A())
+    m.refresh_uid_map()
+    assert m._uid2pkg[10146] == "com.android.chrome"
+    assert m._uid2pkg[1010146] == "com.android.chrome"
+    assert m._uid2pkg[10201] == "com.a"

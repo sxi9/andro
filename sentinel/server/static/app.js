@@ -882,6 +882,7 @@
   /* ================= app manager ================= */
   var amApps = [], amWhich = "all", amLocal = null, amSel = null, amMeta = {}, amUser = null, amRows = {};
   var amDev = DEV, amPending = null;  // device the list belongs to; package to open after a reload
+  var amListPending = false;
   var amHandlers = null, amHandlersKey = "";  // "Defaults on this device", cached per device + user
   var amAutoDone = {}, amResolveIv = null;
   var amChecked = {};                  // package -> 1: ticked rows for the bulk bar
@@ -936,12 +937,17 @@
       $("#am-dtitle").textContent = "App details";
       $("#am-dsub").textContent = "select an app";
       $("#am-tabs").style.display = "none";
+      // never leave the previous device's action buttons under the new header
+      $("#am-dbody").innerHTML = '<div class="empty">Pick an app on the left.</div>';
       renderAmBulk();
     }
+    if (quiet && amListPending) return;  // the resolve poll must not pile up listings on a slow device
     if (!quiet) { $("#am-applist").innerHTML = '<div class="empty">loading apps…</div>'; amHandlers = null; }
     var url = "/api/appmanager/list?which=" + amWhich + (amUser != null ? "&user=" + amUser : "");
+    amListPending = true;
     fetch(dq(url)).then(function (r) { return r.json(); })
       .then(function (d) {
+        amListPending = false;
         amApps = d.apps || []; amMeta = d;
         amRows = {};
         amApps.forEach(function (a) { amRows[a.package] = a; });
@@ -978,7 +984,7 @@
         if (!amSel) loadAmDefaults();
         maybeAutoResolve(d);
       })
-      .catch(function () { $("#am-applist").innerHTML = '<div class="empty">could not load apps</div>'; });
+      .catch(function () { amListPending = false; $("#am-applist").innerHTML = '<div class="empty">could not load apps</div>'; });
     loadAmRunning();
     loadAmRootChip();
     if (!quiet) loadAmOneclick();
@@ -2450,7 +2456,11 @@
           esc(b.package) + (b.default ? " · default" : "") + "</span>";
       }).join(" ") + "</div>";
     }
-    if (!matches.length && !dirs.length) {
+    if (!matches.length && !dirs.length && !(f.scanned > 0)) {
+      // pm answered nothing at all: say so instead of declaring the app absent
+      h += '<p class="verdict">The device returned no packages, so nothing could be checked - ' +
+        "it is probably unauthorized or offline. Check the Devices &amp; ADB tab and try again.</p>";
+    } else if (!matches.length && !dirs.length) {
       h += '<p class="verdict">Nothing named &ldquo;' + esc(q) + "&rdquo; exists on this device for any user. " +
         "It simply is not installed on this ROM (custom ROMs often ship without Chrome or Google Photos, " +
         "for example) and a different app is filling the role - see the browsers above. " +
@@ -2492,7 +2502,7 @@
     var roles = h.roles || {}, hs = h.handlers || {};
     var rows = AM_ROLES.map(function (r) {
       var holder = (roles[r[1]] || [])[0] || (r[2] === "browser" ? h.default_browser : null) ||
-        (r[2] && hs[r[2]] && hs[r[2]][0] ? hs[r[2]][0].package : null);
+        ((h.defaults || {})[r[2]] || null);  // system resolution; never "first handler" as if it were the default
       return '<div class="am-def"><span class="k">' + r[0] + '</span><span class="v">' +
         (holder ? amLink(holder) : '<span class="pk">none</span>') + "</span></div>";
     }).join("");

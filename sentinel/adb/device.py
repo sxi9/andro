@@ -16,7 +16,7 @@ SYSTEM_UIDS = {
     2000: "adb shell", 9999: "nobody",
 }
 
-_PKG_UID_RE = re.compile(r"^package:(\S+)\s+uid:(\d+)", re.M)
+_PKG_UID_RE = re.compile(r"^package:(\S+)\s+uid:(\d+(?:,\d+)*)", re.M)
 
 
 def device_info(adb: AdbClient) -> dict:
@@ -64,13 +64,15 @@ class DeviceMaps:
             log.debug("uid map refresh failed: %s", e)
             return
         m: dict[int, str] = {}
-        for pkg, uid in _PKG_UID_RE.findall(out):
-            u = int(uid)
-            # shared UIDs: keep the first package but note the share
-            if u in m and m[u] != pkg:
-                m[u] = m[u]
-            else:
-                m[u] = pkg
+        for pkg, uids in _PKG_UID_RE.findall(out):
+            # Android 13+ prints every user's uid: "uid:10146,1010146"; map them all
+            for uid in uids.split(","):
+                u = int(uid)
+                # shared UIDs: keep the first package but note the share
+                if u in m and m[u] != pkg:
+                    m[u] = m[u]
+                else:
+                    m[u] = pkg
         if m:
             self._uid2pkg = m
             self._uid_ts = time.time()

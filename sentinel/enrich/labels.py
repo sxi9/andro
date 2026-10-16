@@ -221,6 +221,9 @@ def _adb_range_reader(adb, remote_path: str) -> tuple[int, Callable[[int, int], 
 _ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
 # <meta-data android:name=...> entries a Chromium WebAPK shell carries
 _META_KEYS = {
+    # Chromium's shell writes the bound browser as runtimeHost; keep the older
+    # name too for forks that still use it
+    "org.chromium.webapk.shell_apk.runtimeHost": "host_browser",
     "org.chromium.webapk.shell_apk.hostBrowserPackageName": "host_browser",
     "org.chromium.webapk.shell_apk.startUrl": "start_url",
     "org.chromium.webapk.shell_apk.scope": "scope",
@@ -303,6 +306,8 @@ def resolve_labels(dctx, pkgs: list[str], progress=None) -> dict[str, str]:
                 cache[pkg] = got["label"]
             if got.get("meta"):
                 meta_cache[pkg] = got["meta"]
+            elif _WEBAPK_RE.search(pkg):
+                meta_cache[pkg] = {}   # remember "nothing there" so it is not re-read every run
         except Exception as e:  # noqa: BLE001
             log.debug("label %s: %s", pkg, e)
         if progress and (i % 10 == 0 or i == len(todo) - 1):

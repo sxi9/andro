@@ -177,7 +177,7 @@ def test_find_root_scans_data_app_with_su():
     assert "/data/app/~~abc==/org.cromite.cromite-xyz==" in res["apk_dirs"]
     assert "/data/app/~~def==/com.a-123==" not in res["apk_dirs"]
     su_cmds = [cmd for cmd, su in c.adb.cmds if su]
-    assert su_cmds == ["ls -d /data/app/*/*/ 2>/dev/null"]
+    assert su_cmds == ["ls -d /data/app/*/ /data/app/*/*/ 2>/dev/null"]  # both layouts: Android <=10 and 11+
     # the root flag is also honoured on a real DeviceContext (dctx.device)
     c2 = Ctx()
     c2.device = {"root": True}
@@ -200,15 +200,20 @@ def test_handlers_roles_and_query_activities():
     assert [x["package"] for x in h["dialer"]] == ["com.google.android.dialer"]
     assert h["sms"] == [] and h["camera"] == []
     assert res["default_browser"] == "org.cromite.cromite"
-    # role comes first, so no resolve-activity fallback was needed
-    assert not any(cmd.startswith("pm resolve-activity") for cmd, _ in c.adb.cmds)
+    # the browser role exists, so no resolve-activity fallback was needed for it;
+    # sms/dialer have no role holder here and fall back to the system resolution
+    assert not any(cmd.startswith("pm resolve-activity") and "BROWSABLE" in cmd for cmd, _ in c.adb.cmds)
+    assert res["defaults"]["browser"] == "org.cromite.cromite"
+    assert res["defaults"]["launcher"] == "com.android.launcher3"
+    assert res["defaults"]["sms"] is None  # fake resolve-activity answers "No activity found"
     # the five role lookups and five intent queries are all user-scoped
     assert sum(1 for cmd, _ in c.adb.cmds if cmd.startswith("cmd role get-role-holders --user 0 ")) == 5
     assert sum(1 for cmd, _ in c.adb.cmds if cmd.startswith("pm query-activities --brief --user 0 ")) == 5
     _user_args_are_ints(c.adb)
+    start = len(c.adb.cmds)
     res10 = appmanager.handlers(c, 10)
     assert res10["user"] == 10
-    assert all("--user 10" in cmd for cmd, _ in c.adb.cmds[10:] if "--user" in cmd)
+    assert all("--user 10" in cmd for cmd, _ in c.adb.cmds[start:] if "--user" in cmd)
 
 
 def test_handlers_rejects_bad_user():
@@ -270,7 +275,8 @@ def test_list_apps_single_user_users_installed():
     assert res["user"] == 0
     assert {a["package"]: a["users_installed"] for a in res["apps"]} == \
         {"com.a": [0], WEBAPK: [0], CHROME: []}
-    assert not any("--user" in cmd for cmd, _ in c.adb.cmds[start:])
+    # the owner is always named explicitly: a bare listing walks every user on Android 13+
+    assert all("--user 0" in cmd for cmd, _ in c.adb.cmds[start:] if cmd.startswith("pm list packages"))
     _user_args_are_ints(c.adb)
     # uninstalled-only view across users: chrome is installed somewhere, so none
     assert appmanager.list_apps(c, "uninstalled", user="all")["apps"] == []

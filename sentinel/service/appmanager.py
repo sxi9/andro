@@ -50,6 +50,8 @@ _ROLES: dict[str, str] = {
 # where preinstalled APKs live (one folder per app); readable without root
 _APK_DIRS = ("/system/app", "/system/priv-app", "/product/app", "/product/priv-app",
              "/system_ext/app", "/system_ext/priv-app", "/vendor/app", "/apex")
+# /data/app entries that are package dirs: "<pkg>-<hash>" (not ~~hash, lib, oat)
+_DATA_APP_DIR = re.compile(r"^[A-Za-z0-9_.]+-[A-Za-z0-9_=-]+$")
 
 
 class _Refused(AdbError):
@@ -112,7 +114,9 @@ def _pm_list(adb, flag: str, user: int | None = None, uninstalled: bool = False)
     """`pm list packages` with graceful fallbacks: some builds reject -i or -U.
     Returns (parsed, flags_used). `uninstalled` adds -u (packages removed for
     this user with `pm uninstall --user` but still on the device)."""
-    scope = (f"--user {int(user)} " if user is not None else "") + ("-u " if uninstalled else "")
+    # always name the user: since Android 13 a bare `pm list packages` walks
+    # every user and prints "uid:10146,1010146" lines for shared packages
+    scope = f"--user {int(user) if user is not None else 0} " + ("-u " if uninstalled else "")
     # the fallbacks only drop -i/-U (which some builds reject); the type filter
     # itself is never dropped, otherwise an empty "-d" result would turn into
     # the full package list
@@ -171,7 +175,7 @@ def list_apps(dctx, which: str = "all", user: int | str | None = None,
         real_uid = 0 if uid is None else int(uid)
         for pkg in inst:
             where.setdefault(pkg, set()).add(real_uid)
-        disabled_by[real_uid] = _pm_set(adb, f"--user {real_uid} -d" if uid is not None else "-d")
+        disabled_by[real_uid] = _pm_set(adb, f"--user {real_uid} -d")
     if not base:
         res = {"apps": [], "count": 0, "flags": used, "users": users,
                "user": "all" if every else (0 if user is None else user),
@@ -183,7 +187,7 @@ def list_apps(dctx, which: str = "all", user: int | str | None = None,
         return res
     # the system flag is a property of the package, not of a user: one listing
     # (owner scope) is enough, -u so debloated system apps keep their flag
-    system = _pm_set(adb, ("" if user is None or every else f"--user {int(user)} ") + "-s -u")
+    system = _pm_set(adb, ("--user 0 " if user is None or every else f"--user {int(user)} ") + "-s -u")
     sizes = (dctx.state.get("storage") or {}).get("apps") or {}
     god = dctx.state.get("godmode") or {}
     god_pkgs = {p for pkgs in god.values() for p in pkgs}
@@ -284,18 +288,25 @@ def handlers(dctx, user: int = 0) -> dict:
         except AdbError:
             out = ""
         found[key] = _parse_components(out, labels)
-    default = roles["browser"][0] if roles["browser"] else None
-    if default is None:
+    # `cmd role get-role-holders` only exists on Android 14+; below that the
+    # system's own resolution (`pm resolve-activity`) is the honest default:
+    # it returns the chosen handler, or the chooser when none is set
+    defaults: dict[str, str | None] = {}
+    for key, role_key in (("browser", "browser"), ("launcher", "home"), ("sms", "sms"),
+                          ("dialer", "dialer")):
+        intent = _INTENTS[key]
+        if roles.get(role_key):
+            defaults[key] = roles[role_key][0]
+            continue
         try:
-            out = adb.shell_sync(f"pm resolve-activity --brief --user {user} "
-                                 "-a android.intent.action.VIEW -d https://example.com", timeout=15)
+            out = adb.shell_sync(f"pm resolve-activity --brief --user {user} {intent}", timeout=15)
         except AdbError:
             out = ""
         lines = [m.group(1) for m in map(_COMP_LINE.match, out.splitlines()) if m]
-        # "android/...ResolverActivity" means no default is set, not a browser
-        if lines and lines[-1] != "android":
-            default = lines[-1]
-    return {"user": user, "roles": roles, "handlers": found, "default_browser": default}
+        # "android/...ResolverActivity" means no default is set, not a handler
+        defaults[key] = lines[-1] if lines and lines[-1] != "android" else None
+    return {"user": user, "roles": roles, "handlers": found, "defaults": defaults,
+            "default_browser": defaults.get("browser")}
 
 
 def find_package(dctx, query: str) -> dict:
@@ -318,7 +329,7 @@ def find_package(dctx, query: str) -> dict:
         inst = set(_pm_list(adb, "", uid, uninstalled=False)[0])
         for pkg in full | inst:
             seen.setdefault(pkg, {})[uid] = pkg in inst
-    system = _pm_set(adb, "-s -u")
+    system = _pm_set(adb, "--user 0 -s -u")
     matches = []
     for pkg in sorted(seen):
         label = label_for(pkg, labels)
@@ -333,12 +344,16 @@ def find_package(dctx, query: str) -> dict:
     except AdbError:
         pass
     if _has_root(dctx):
-        # /data/app/~~<hash>/<pkg>-<hash>/ is only listable as root
+        # only listable as root; Android 11+ nests /data/app/~~<hash>/<pkg>-<hash>/,
+        # older builds use /data/app/<pkg>-<hash>/ - take both levels and keep
+        # only dirs named like a package (so lib/ and oat/ never match)
         try:
-            out = adb.shell_sync("ls -d /data/app/*/*/ 2>/dev/null", su=True, timeout=30)
+            out = adb.shell_sync("ls -d /data/app/*/ /data/app/*/*/ 2>/dev/null", su=True, timeout=30)
             for line in out.splitlines():
                 p = line.strip().rstrip("/")
-                if p.startswith("/data/app/") and ql in posixpath.basename(p).lower():
+                name = posixpath.basename(p)
+                if (p.startswith("/data/app/") and _DATA_APP_DIR.match(name)
+                        and ql in name.lower()):
                     apk_dirs.append(p)
         except AdbError:
             pass

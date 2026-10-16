@@ -188,7 +188,7 @@ def _demo_app_detail(pkg: str) -> dict:
         "godmode": [], "sizes": {"data": 48 * 1024 * 1024, "cache": 12 * 1024 * 1024,
                                  "app": 44 * 1024 * 1024},
         "apk_paths": [f"/data/app/~~x/{pkg}-y/base.apk"],
-        "users_installed": [0],
+        "users_installed": [10] if pkg == _DEMO_CHROME else [0],  # matches the demo list / find
         "state": {"installed": True, "hidden": False, "suspended": False, "stopped": False,
                   "enabled_state": 0, "frozen": None, "user": 0},
         "perm_flags": {"android.permission.CAMERA": ["USER_SET", "USER_SENSITIVE_WHEN_GRANTED"],
@@ -369,13 +369,22 @@ _DEMO_USERS = [{"id": 0, "name": "Owner", "running": True},
 _DEMO_CHROME = "com.android.chrome"
 
 
-def _can_resolve() -> bool:
-    """True when the optional APK parser is installed on this host."""
+def _probe_resolver() -> bool:
     try:
         import pyaxmlparser  # noqa: F401
         return True
     except ImportError:
         return False
+
+
+# probed once at import: the import pulls in lxml and would otherwise run on
+# the event loop inside the first list request
+_CAN_RESOLVE = _probe_resolver()
+
+
+def _can_resolve() -> bool:
+    """True when the APK parser is installed on this host."""
+    return _CAN_RESOLVE
 
 
 def _demo_handlers(user: int) -> dict:
@@ -390,7 +399,11 @@ def _demo_handlers(user: int) -> dict:
              "camera": "com.android.camera2/com.android.camera.CaptureActivity"}
     handlers = {k: [{"package": c.split("/")[0], "label": label_for(c.split("/")[0]),
                      "component": c}] for k, c in comps.items()}
-    return {"user": user, "roles": roles, "handlers": handlers, "default_browser": _DEMO_CHROME}
+    return {"user": user, "roles": roles, "handlers": handlers,
+            "defaults": {"browser": _DEMO_CHROME, "launcher": "com.android.launcher3",
+                         "sms": "com.google.android.apps.messaging",
+                         "dialer": "com.google.android.dialer"},
+            "default_browser": _DEMO_CHROME}
 
 
 def _demo_find(q: str) -> dict:

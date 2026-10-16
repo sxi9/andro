@@ -163,3 +163,19 @@ pip install -e .[dev]
 pytest            # parser + rules + store suites, no device needed
 python -m sentinel --demo   # full pipeline against a simulated device
 ```
+
+## Files, storage and backup (own-device)
+
+The **Files & Storage** tab adds device-management capabilities on top of monitoring:
+
+- **Per-app storage** — data, cache and APK size for every app (from `dumpsys diskstats`, no slow `du` sweep), sorted by footprint.
+- **App storage inspector** — for any app, where it keeps everything: its `/data/data/<pkg>` layout, the `files`/`cache`/`databases`/`shared_prefs` subdirs with sizes, the external dir, and a scan for log-like files it writes.
+- **Extract / backup** — pull an app exactly as stored: its APK (base + splits) and its private data directory tarred as-is, plus an optional external dir, written under `~/.android-sentinel/backups/<pkg>_<timestamp>/` with a manifest. Same operation as Titanium/Neo Backup. Needs root.
+- **File browser** — read-only `ls` navigation of the device filesystem (root), starting at `/sdcard`.
+- **Evidence export** — a signed, timestamped JSON + text report of alerts and key events for a chosen window, saved locally, for your records or to document stalkerware.
+
+Everything stays on this computer. These features need root for app data dirs; the APK and `/sdcard` work without it.
+
+## Per-app risk score
+
+Each app gets a 0-100 risk score blending god-mode access, dangerous permissions, sideload status, cellular egress and the SMS+internet combo. The Apps and Files tabs sort by it, so the apps worth reviewing float to the top.

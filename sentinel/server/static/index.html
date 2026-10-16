@@ -30,6 +30,7 @@
       <button data-tab="apps"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Apps &amp; Permissions</button>
       <button data-tab="logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h16v16H4z"/><path d="M8 9h4M8 13h8M8 17h6"/></svg>Logcat</button>
       <button data-tab="radio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 15.8a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/><path d="M12 19V9"/></svg>Cellular &amp; Radio</button>
+      <button data-tab="storage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2M4 7v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7M8 11h8M8 15h5"/></svg>Files &amp; Storage</button>
     </nav>
     <div class="navlabel">Defense</div>
     <nav class="nav" data-nav>
@@ -46,6 +47,7 @@
       <button data-tab="apps">Apps</button>
       <button data-tab="logs">Logcat</button>
       <button data-tab="radio">Cellular</button>
+      <button data-tab="storage">Files</button>
       <button data-tab="alerts">Alerts</button>
     </div>
 
@@ -179,6 +181,63 @@
         <div class="card pad0" style="margin-top:14px">
           <div class="ch"><h3>Radio log</h3><span class="hint">logcat -b radio</span></div>
           <div class="logview" id="radiolog" style="max-height:340px"></div>
+        </div>
+      </section>
+
+      <!-- FILES & STORAGE -->
+      <section class="panel" data-panel="storage">
+        <div class="grid tiles">
+          <div class="card tile"><div class="k">App data on device</div><div class="v tnum" id="t-appdata">—</div><div class="d">across all apps</div></div>
+          <div class="card tile"><div class="k">Data free</div><div class="v tnum" id="t-datafree">—</div><div class="d" id="t-cachefree">—</div></div>
+          <div class="card tile"><div class="k">Backups taken</div><div class="v tnum" id="t-backups">0</div><div class="d">on this computer</div></div>
+        </div>
+
+        <div class="cols" style="margin-top:14px">
+          <div class="card pad0">
+            <div class="ch"><h3>Per-app storage</h3><span class="hint">data · cache · APK, with extract / backup</span></div>
+            <div class="tblwrap" style="max-height:460px">
+              <table id="storagetbl"><thead><tr><th>App</th><th>Data</th><th>Cache</th><th>APK</th><th></th></tr></thead><tbody><tr><td colspan="5" class="empty">loading storage overview…</td></tr></tbody></table>
+            </div>
+          </div>
+          <div class="card pad0">
+            <div class="ch"><h3>File browser</h3><span class="hint">read-only · root</span></div>
+            <div class="logtools" style="gap:6px">
+              <button class="btn" id="fb-up">up</button>
+              <input id="fb-path" value="/sdcard" autocomplete="off" spellcheck="false">
+              <button class="btn p" id="fb-go">go</button>
+            </div>
+            <div class="feed" id="filebrowser" style="max-height:400px"><div class="empty">enter a path and press go</div></div>
+          </div>
+        </div>
+
+        <div class="card pad0" id="appstorage-card" style="margin-top:14px;display:none">
+          <div class="ch"><h3 id="as-title">App storage detail</h3><span class="hint">where this app keeps everything</span></div>
+          <div id="appstorage"></div>
+        </div>
+
+        <div class="cols" style="margin-top:14px">
+          <div class="card pad0">
+            <div class="ch"><h3>Backups</h3><span class="hint" id="backupdir">on this computer</span></div>
+            <div id="backuplist"><div class="empty">no backups yet</div></div>
+          </div>
+          <div class="card">
+            <div class="sectitle" style="margin-top:0">Evidence export</div>
+            <p style="font-size:12.5px;color:var(--fg-dim);margin:4px 0 12px">Write a signed, timestamped local report of alerts and key events, for your records or to document stalkerware.</p>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <select id="ev-hours" style="background:var(--bg);border:1px solid var(--border);border-radius:7px;color:var(--fg);padding:7px 10px;font-size:12.5px">
+                <option value="24">last 24 hours</option>
+                <option value="72">last 3 days</option>
+                <option value="168">last 7 days</option>
+              </select>
+              <button class="btn p" id="ev-go">Export</button>
+            </div>
+            <div id="ev-result" style="font-size:12px;color:var(--fg-mut);font-family:var(--ff-mono);margin-top:10px"></div>
+          </div>
+        </div>
+
+        <div class="note">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+          <span>Extract pulls the APK (base + splits) and the app's private data directory exactly as stored, to this computer. Needs root. Everything stays local.</span>
         </div>
       </section>
 

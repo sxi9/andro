@@ -35,6 +35,146 @@ log = logging.getLogger("sentinel.app")
 
 _STATIC = Path(__file__).parent / "static"
 
+# Permissions that materially raise an app's risk, short-named.
+_DANGEROUS = {
+    "READ_SMS", "RECEIVE_SMS", "RECORD_AUDIO", "CAMERA", "ACCESS_FINE_LOCATION",
+    "ACCESS_BACKGROUND_LOCATION", "READ_CONTACTS", "READ_CALL_LOG",
+    "SYSTEM_ALERT_WINDOW", "REQUEST_INSTALL_PACKAGES", "QUERY_ALL_PACKAGES",
+    "READ_PHONE_STATE", "PROCESS_OUTGOING_CALLS", "READ_EXTERNAL_STORAGE",
+}
+# where apps commonly keep logs, relative to /data/data/<pkg>
+_LOG_HINTS = ("*.log", "*.txt", "*log*", "*.trace", "*.out")
+
+
+def _risk_score(d: dict, godmode: list[str], netstat: dict) -> tuple[int, list[str]]:
+    """0-100 blend of the factors a privacy-conscious owner cares about."""
+    score = 0
+    factors: list[str] = []
+    if godmode:
+        score += min(30 * len(godmode), 45)
+        factors.append("god-mode: " + ", ".join(godmode))
+    granted = {p.rsplit(".", 1)[-1] for p in (d.get("granted") or [])}
+    hot = sorted(granted & _DANGEROUS)
+    if hot:
+        score += min(6 * len(hot), 30)
+        factors.append(f"{len(hot)} dangerous permissions")
+    installer = d.get("installer")
+    if installer not in ("com.android.vending", "com.sec.android.app.samsungapps",
+                         "(system)", None) or (installer is None and not d.get("system")):
+        score += 12
+        factors.append("sideloaded")
+    mtx = netstat.get("mtx", 0) or 0
+    if mtx > 50_000_000:
+        score += 8
+        factors.append("heavy cellular egress")
+    if "READ_SMS" in granted and "INTERNET" in granted:
+        score += 10
+        factors.append("SMS + internet")
+    return min(score, 100), factors
+
+
+def _inspect_app_storage(ctx, pkg: str) -> dict:
+    """Where one app keeps its data, and its log-like files. Root, on demand."""
+    adb = ctx.adb
+    from ..parsers.storage import parse_du_k, parse_ls_la
+    data_dir = f"/data/data/{pkg}"
+    ext_dir = f"/sdcard/Android/data/{pkg}"
+    sizes = parse_du_k(adb.du_sizes([data_dir, ext_dir, f"{data_dir}/cache",
+                                     f"{data_dir}/databases", f"{data_dir}/shared_prefs",
+                                     f"{data_dir}/files"]))
+    try:
+        listing = [e.to_dict() for e in parse_ls_la(adb.list_dir(data_dir))]
+    except AdbError:
+        listing = []
+    extra = " ".join(f'-o -name "{p}"' for p in _LOG_HINTS)
+    extra = extra[3:] if extra.startswith("-o ") else extra  # drop leading -o
+    log_out = adb.find_files(data_dir, extra=f"\\( {extra} \\)", limit=100)
+    logs = [ln.strip() for ln in log_out.splitlines() if ln.strip()]
+    return {
+        "package": pkg, "data_dir": data_dir, "external_dir": ext_dir,
+        "sizes": sizes, "entries": listing, "log_files": logs,
+        "subdirs": {
+            "files": f"{data_dir}/files", "cache": f"{data_dir}/cache",
+            "databases": f"{data_dir}/databases", "shared_prefs": f"{data_dir}/shared_prefs",
+            "code_cache": f"{data_dir}/code_cache", "external": ext_dir,
+        },
+    }
+
+
+def _list_files(ctx, path: str) -> dict:
+    from ..parsers.storage import parse_ls_la
+    try:
+        entries = [e.to_dict() for e in parse_ls_la(ctx.adb.list_dir(path))]
+        err = None
+    except AdbError as e:
+        entries, err = [], str(e)
+    return {"path": path, "entries": entries, "error": err}
+
+
+def _export_evidence(ctx, hours: float) -> dict:
+    """Write a timestamped JSON + text report of the window to data_dir/reports."""
+    import hashlib
+    import json
+    since = time.time() - hours * 3600
+    alerts = ctx.store.alerts(state=None, limit=1000)
+    alerts = [a for a in alerts if a["ts"] >= since]
+    events = ctx.store.events(since=since, limit=2000)
+    key_events = [e for e in events if e["kind"].startswith(("sensor.", "threat.", "app."))
+                  or e["severity"] in ("warn", "crit")]
+    report = {
+        "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "window_hours": hours,
+        "device": ctx.device,
+        "alerts": alerts,
+        "events": key_events[:1000],
+    }
+    body = json.dumps(report, indent=2, default=str)
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    report["sha256"] = digest
+    body = json.dumps(report, indent=2, default=str)
+    out_dir = ctx.cfg.data_dir / "reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    (out_dir / f"evidence_{stamp}.json").write_text(body)
+    txt = [f"Android Sentinel evidence report", f"generated {report['generated']}",
+           f"window: last {hours}h", f"sha256: {digest}", ""]
+    txt.append(f"ALERTS ({len(alerts)}):")
+    for a in alerts:
+        txt.append(f"  [{a['severity']}] {a['title']} - {a.get('detail','')}")
+    (out_dir / f"evidence_{stamp}.txt").write_text("\n".join(txt))
+    return {"path": str(out_dir / f"evidence_{stamp}.json"),
+            "sha256": digest, "alerts": len(alerts), "events": len(key_events)}
+
+
+def _demo_app_storage(pkg: str) -> dict:
+    data_dir = f"/data/data/{pkg}"
+    return {
+        "package": pkg, "data_dir": data_dir,
+        "external_dir": f"/sdcard/Android/data/{pkg}",
+        "sizes": {data_dir: 48 * 1024 * 1024, f"{data_dir}/cache": 12 * 1024 * 1024,
+                  f"{data_dir}/databases": 8 * 1024 * 1024,
+                  f"{data_dir}/shared_prefs": 64 * 1024, f"{data_dir}/files": 20 * 1024 * 1024},
+        "entries": [
+            {"name": "cache", "kind": "dir", "size": 4096, "perms": "drwxrws--x", "mtime": "2026-10-15 10:00", "target": None},
+            {"name": "databases", "kind": "dir", "size": 4096, "perms": "drwxrwx--x", "mtime": "2026-10-15 10:00", "target": None},
+            {"name": "files", "kind": "dir", "size": 4096, "perms": "drwxrwx--x", "mtime": "2026-10-15 10:00", "target": None},
+            {"name": "shared_prefs", "kind": "dir", "size": 4096, "perms": "drwxrwx--x", "mtime": "2026-10-15 10:00", "target": None},
+        ],
+        "log_files": [f"{data_dir}/files/app.log", f"{data_dir}/files/logs/network.log",
+                      f"{data_dir}/cache/crash.txt"],
+        "subdirs": {"files": f"{data_dir}/files", "cache": f"{data_dir}/cache",
+                    "databases": f"{data_dir}/databases", "shared_prefs": f"{data_dir}/shared_prefs",
+                    "code_cache": f"{data_dir}/code_cache", "external": f"/sdcard/Android/data/{pkg}"},
+    }
+
+
+def _demo_files(path: str) -> list[dict]:
+    base = [("DCIM", "dir"), ("Download", "dir"), ("Android", "dir"), ("Pictures", "dir"),
+            ("whatsapp.db", "file"), ("notes.txt", "file")]
+    return [{"name": n, "kind": k, "size": 4096 if k == "dir" else 20480,
+             "perms": "drwxrwx---" if k == "dir" else "-rw-rw----",
+             "mtime": "2026-10-15 09:30", "target": None} for n, k in base]
+
 
 def build_context(cfg: Config) -> AppContext:
     bus = EventBus()
@@ -135,11 +275,12 @@ def _collectors_for(ctx: AppContext) -> list:
     from ..collectors.packages import PackagesCollector
     from ..collectors.radio import RadioCollector
     from ..collectors.sensors import SensorsCollector
+    from ..collectors.storage import StorageCollector
     from ..collectors.threats import ThreatsCollector
     return [
         LogcatCollector(ctx), SensorsCollector(ctx), NetworkCollector(ctx),
         CaptureCollector(ctx), NetstatsCollector(ctx), PackagesCollector(ctx),
-        ThreatsCollector(ctx), RadioCollector(ctx),
+        ThreatsCollector(ctx), RadioCollector(ctx), StorageCollector(ctx),
     ]
 
 
@@ -169,6 +310,9 @@ def create_app(cfg: Config) -> FastAPI:
 
     app = FastAPI(title="Android Sentinel", version=__version__, lifespan=lifespan)
     app.state.ctx = ctx
+
+    from ..service.backup import BackupService
+    backup = BackupService(ctx)
 
     # This dashboard reads your whole device; it is local-only by design.
     # Host validation defeats DNS-rebinding (a remote page resolving its own
@@ -234,18 +378,25 @@ def create_app(cfg: Config) -> FastAPI:
         inv = dict(ctx.state.get("apps") or {})
         god = ctx.state.get("godmode") or {}
         stats = ctx.state.get("netstats") or {}
+        storage = (ctx.state.get("storage") or {}).get("apps") or {}
         uid_stats = {int(u): v for u, v in stats.items() if str(u).isdigit()}
         out = []
         for pkg, d in inv.items():
             uid = d.get("uid")
             st = uid_stats.get(uid, {}) if uid else {}
+            godlist = sorted(a for a, pkgs in god.items() if pkg in pkgs)
+            szd = storage.get(pkg, {})
+            risk, factors = _risk_score(d, godlist, st)
             out.append({
                 "package": pkg, **d,
-                "godmode": sorted(a for a, pkgs in god.items() if pkg in pkgs),
+                "godmode": godlist,
                 "rx": st.get("rx", 0), "tx": st.get("tx", 0),
                 "mtx": st.get("mtx", 0), "mrx": st.get("mrx", 0),
+                "data_size": szd.get("data", 0), "cache_size": szd.get("cache", 0),
+                "apk_size": szd.get("app", 0),
+                "risk": risk, "risk_factors": factors,
             })
-        out.sort(key=lambda a: (-(len(a["godmode"]) > 0), -(a["tx"] or 0), a["package"]))
+        out.sort(key=lambda a: (-a["risk"], -(a["tx"] or 0), a["package"]))
         return out
 
     @app.get("/api/netstats")
@@ -264,6 +415,49 @@ def create_app(cfg: Config) -> FastAPI:
         if ok:
             ctx.store.put_snapshot("rules_enabled", ctx.rules.enabled_map())
         return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
+
+    # ---------- storage / files / backup (own-device) ----------
+    @app.get("/api/storage")
+    def storage():
+        return ctx.state.get("storage") or {"apps": {}, "totals": {}}
+
+    @app.get("/api/storage/app/{pkg}")
+    async def storage_app(pkg: str):
+        """On-demand deep look at where one app keeps its data and logs."""
+        if ctx.adb is None:
+            return {"demo": True, **_demo_app_storage(pkg)}
+        return await asyncio.to_thread(_inspect_app_storage, ctx, pkg)
+
+    @app.get("/api/files")
+    async def files(path: str = "/sdcard"):
+        if ctx.adb is None:
+            return {"path": path, "demo": True, "entries": _demo_files(path)}
+        return await asyncio.to_thread(_list_files, ctx, path)
+
+    @app.post("/api/backup/{pkg}")
+    async def start_backup(pkg: str, body: dict | None = None):
+        if ctx.adb is None:
+            return JSONResponse({"error": "backup needs a real device (not demo mode)"},
+                                status_code=400)
+        body = body or {}
+        job = backup.new_job(pkg, {"apk": bool(body.get("apk", True)),
+                                   "data": bool(body.get("data", True)),
+                                   "external": bool(body.get("external", False))})
+        asyncio.create_task(asyncio.to_thread(backup.run, job))
+        return {"job": job["id"], "pkg": pkg, "state": job["state"]}
+
+    @app.get("/api/backup/jobs")
+    def backup_jobs():
+        return sorted(backup.jobs.values(), key=lambda j: j["id"], reverse=True)
+
+    @app.get("/api/backups")
+    def backups():
+        return backup.list_backups()
+
+    @app.get("/api/export/evidence")
+    def export_evidence(hours: float = 24.0):
+        """Signed, timestamped local report for the last N hours."""
+        return _export_evidence(ctx, hours)
 
     # ---------- WebSocket ----------
     @app.websocket("/ws")

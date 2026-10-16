@@ -334,3 +334,57 @@ def test_camera_closed_section_not_live():
         "  Client package: com.stale.app\n"
     )
     assert parse_camera_clients(text) == {"com.live.app"}
+
+
+# ---------------- storage ----------------
+
+from sentinel.parsers.storage import parse_diskstats, parse_du_k, parse_ls_la
+
+LS_LA = """\
+total 32
+drwxrwx--x  4 u0_a155 u0_a155 4096 2026-10-01 10:00 .
+drwxrwx--x 60 system  system  4096 2026-10-01 09:00 ..
+drwxrws--x  2 u0_a155 u0_a155 4096 2026-10-15 18:40 cache
+-rw-rw----  1 u0_a155 u0_a155 2048 2026-10-15 18:41 app.log
+lrwxrwxrwx  1 root    root       21 2026-10-01 10:00 lib -> /data/app/lib/arm64
+"""
+
+
+def test_parse_ls_la():
+    e = parse_ls_la(LS_LA)
+    names = [x.name for x in e]
+    assert "." not in names and ".." not in names
+    cache = [x for x in e if x.name == "cache"][0]
+    assert cache.kind == "dir"
+    log = [x for x in e if x.name == "app.log"][0]
+    assert log.kind == "file" and log.size == 2048
+    lib = [x for x in e if x.name == "lib"][0]
+    assert lib.kind == "link" and lib.target == "/data/app/lib/arm64"
+    # dirs sort before files
+    assert e[0].kind == "dir"
+
+
+def test_parse_du_k():
+    text = "48\t/data/data/com.x/cache\n1024\t/data/data/com.x\n"
+    d = parse_du_k(text)
+    assert d["/data/data/com.x"] == 1024 * 1024
+    assert d["/data/data/com.x/cache"] == 48 * 1024
+
+
+DISKSTATS = """\
+Latency: 1ms [512B cold read]
+Data-Free: 4096000K / 12000000K total = 34% free
+Cache-Free: 2048000K / 3000000K total = 68% free
+Package Names: [com.whatsapp, com.led.qrflash]
+App Sizes: [104857600, 20971520]
+App Data Sizes: [52428800, 8388608]
+Cache Sizes: [10485760, 1048576]
+"""
+
+
+def test_parse_diskstats():
+    d = parse_diskstats(DISKSTATS)
+    assert d["apps"]["com.whatsapp"]["app"] == 104857600
+    assert d["apps"]["com.whatsapp"]["data"] == 52428800
+    assert d["apps"]["com.led.qrflash"]["cache"] == 1048576
+    assert d["totals"]["data_free"] == 4096000 * 1024

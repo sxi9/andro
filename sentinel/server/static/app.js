@@ -24,6 +24,7 @@
     apps: ["Apps & Permissions", "Inventory, god-mode access and dangerous grants"],
     logs: ["Logcat", "System log attributed to the owning app"],
     radio: ["Cellular & Radio", "Telephony state, serving cell and the radio log"],
+    storage: ["Files & Storage", "Per-app storage, the file browser, and app extraction"],
     alerts: ["Alerts & Rules", "What tripped, and the detections watching your device"],
   };
   var currentTab = "monitor";
@@ -38,6 +39,7 @@
     if (tab === "alerts") { loadAlerts(); loadRules(); }
     if (tab === "logs") renderLogs();
     if (tab === "radio") renderRadioLog();
+    if (tab === "storage") loadStorage();
   }
   $$("[data-nav] button").forEach(function (b) {
     b.addEventListener("click", function () { go(b.dataset.tab); });
@@ -340,8 +342,10 @@
         if (sideloaded) side++;
         var granted = (a.granted || []).map(function (p) { return p.split(".").pop(); });
         var hot = granted.filter(function (p) { return DANGEROUS.indexOf(p) >= 0; });
-        var init = shortApp(a.package).slice(0, 2).toUpperCase();
-        return '<div class="approw"><div class="appicon">' + esc(init) + "</div>" +
+        var risk = a.risk || 0;
+        var rcls = risk >= 70 ? "r" : risk >= 40 ? "y" : "g";
+        return '<div class="approw"><div class="score ' + rcls + '" title="' +
+          esc((a.risk_factors || []).join("; ") || "low risk") + '">' + risk + "</div>" +
           '<div class="appmeta"><div class="nm">' + esc(shortApp(a.package)) +
           (a.godmode || []).map(function (g) { return ' <span class="pill crit">' + esc(g) + "</span>"; }).join("") +
           "</div>" +
@@ -349,8 +353,8 @@
           (sideloaded ? "sideloaded" : esc(a.installer)) +
           (a.version_name ? " · v" + esc(a.version_name) : "") + "</div>" +
           '<div class="chips">' +
+          (a.data_size ? '<span class="pill">' + fmtBytes(a.data_size) + " data</span>" : "") +
           (a.mtx ? '<span class="pill">' + fmtBytes(a.mtx) + " cellular</span>" : "") +
-          (a.tx ? '<span class="pill">' + fmtBytes(a.tx) + " total tx</span>" : "") +
           (sideloaded ? '<span class="pill warn">not Play</span>' : "") + "</div>" +
           (hot.length ? '<div class="perms">' + hot.map(function (p) {
             return '<span class="perm hot">' + esc(p) + "</span>";
@@ -423,6 +427,154 @@
     }).catch(function () {});
   }
   loadAlerts(); loadRules();
+
+  /* ---------- files & storage ---------- */
+  var FOLDER = '<svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>';
+  var FILE = '<svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v4h4"/></svg>';
+  var LINKI = '<svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/></svg>';
+
+  function loadStorage() {
+    fetch("/api/apps").then(function (r) { return r.json(); }).then(function (apps) {
+      var rows = apps.slice().sort(function (a, b) {
+        return (b.data_size || 0) - (a.data_size || 0);
+      });
+      var tbody = $("#storagetbl tbody");
+      tbody.innerHTML = rows.map(function (a) {
+        return '<tr class="srow" data-pkg="' + esc(a.package) + '">' +
+          '<td><div style="font-weight:500">' + esc(shortApp(a.package)) + "</div>" +
+          '<div class="mono" style="font-size:11px;color:var(--fg-mut);overflow:hidden;text-overflow:ellipsis;max-width:200px;white-space:nowrap">' + esc(a.package) + "</div></td>" +
+          '<td class="mono tnum">' + fmtBytes(a.data_size) + "</td>" +
+          '<td class="mono tnum">' + fmtBytes(a.cache_size) + "</td>" +
+          '<td class="mono tnum">' + fmtBytes(a.apk_size) + "</td>" +
+          '<td><div class="act"><button class="btn" data-inspect="' + esc(a.package) + '">inspect</button>' +
+          '<button class="btn p" data-backup="' + esc(a.package) + '">extract</button></div></td></tr>";
+      }).join("") || '<tr><td colspan="5" class="empty">no app storage data yet (needs a device)</td></tr>';
+      $$("#storagetbl [data-inspect]").forEach(function (b) {
+        b.addEventListener("click", function () { inspectApp(b.dataset.inspect); });
+      });
+      $$("#storagetbl [data-backup]").forEach(function (b) {
+        b.addEventListener("click", function () { startBackup(b.dataset.backup); });
+      });
+    }).catch(function () {});
+
+    fetch("/api/storage").then(function (r) { return r.json(); }).then(function (s) {
+      var apps = s.apps || {}, total = 0;
+      Object.keys(apps).forEach(function (k) { total += (apps[k].data || 0) + (apps[k].app || 0); });
+      $("#t-appdata").textContent = total ? fmtBytes(total) : "—";
+      var t = s.totals || {};
+      $("#t-datafree").textContent = t.data_free ? fmtBytes(t.data_free) : "—";
+      $("#t-cachefree").textContent = t.cache_free ? fmtBytes(t.cache_free) + " cache free" : "";
+    }).catch(function () {});
+
+    loadBackups();
+  }
+
+  function inspectApp(pkg) {
+    var card = $("#appstorage-card");
+    card.style.display = "";
+    $("#as-title").textContent = "App storage: " + shortApp(pkg);
+    $("#appstorage").innerHTML = '<div class="empty">reading ' + esc(pkg) + " …</div>";
+    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    fetch("/api/storage/app/" + encodeURIComponent(pkg)).then(function (r) { return r.json(); })
+      .then(function (d) {
+        var sizes = d.sizes || {};
+        var sub = d.subdirs || {};
+        var kv = Object.keys(sub).map(function (k) {
+          var p = sub[k];
+          return "<dt>" + esc(k) + "</dt><dd>" + esc(p) +
+            (sizes[p] ? '  <span style="color:var(--accent)">' + fmtBytes(sizes[p]) + "</span>" : "") + "</dd>";
+        }).join("");
+        var logs = (d.log_files || []).length
+          ? '<div class="sectitle" style="padding:0 15px">log files found (' + d.log_files.length + ")</div>" +
+            (d.log_files || []).slice(0, 40).map(function (f) {
+              return '<div class="fentry file">' + FILE + '<span class="fn">' + esc(f) + "</span></div>";
+            }).join("")
+          : '<div class="empty">no log-like files found</div>';
+        $("#appstorage").innerHTML =
+          '<dl class="kv2"><dt>data dir</dt><dd>' + esc(d.data_dir) +
+          (sizes[d.data_dir] ? '  <span style="color:var(--accent)">' + fmtBytes(sizes[d.data_dir]) + "</span>" : "") + "</dd>" + kv + "</dl>" +
+          '<div style="padding:0 15px 12px"><button class="btn p" data-backup2="' + esc(pkg) + '">extract this app (APK + data)</button></div>' +
+          logs;
+        var bb = $("#appstorage [data-backup2]");
+        if (bb) bb.addEventListener("click", function () { startBackup(pkg); });
+      }).catch(function () {
+        $("#appstorage").innerHTML = '<div class="empty">could not read storage (needs root)</div>';
+      });
+  }
+
+  function startBackup(pkg) {
+    fetch("/api/backup/" + encodeURIComponent(pkg), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apk: true, data: true, external: false }),
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      if (res.error) { alert2(res.error); return; }
+      alert2("Extract started for " + shortApp(pkg) + " — watch the Live feed; it appears under Backups when done.");
+      setTimeout(loadBackups, 3000);
+    }).catch(function () {});
+  }
+
+  function alert2(msg) {
+    var r = $("#ev-result");
+    if (r) { r.textContent = msg; }
+  }
+
+  function loadBackups() {
+    fetch("/api/backups").then(function (r) { return r.json(); }).then(function (b) {
+      $("#t-backups").textContent = (b || []).length;
+      $("#backuplist").innerHTML = (b || []).map(function (x) {
+        return '<div class="fentry"><span class="fn">' + esc(x.package || x.name) +
+          '  <span style="color:var(--fg-mut)">' + (x.components || []).join("+") + "</span></span>" +
+          '<span class="fsz">' + fmtBytes(x.bytes) + "</span></div>" +
+          '<div class="mono" style="font-size:10.5px;color:var(--fg-mut);padding:0 15px 8px;word-break:break-all">' + esc(x.path) + "</div>";
+      }).join("") || '<div class="empty">no backups yet</div>';
+    }).catch(function () {});
+  }
+
+  function browseFiles(path) {
+    $("#fb-path").value = path;
+    $("#filebrowser").innerHTML = '<div class="empty">listing ' + esc(path) + " …</div>";
+    fetch("/api/files?path=" + encodeURIComponent(path)).then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) { $("#filebrowser").innerHTML = '<div class="empty">' + esc(d.error) + "</div>"; return; }
+        var ents = d.entries || [];
+        $("#filebrowser").innerHTML = ents.map(function (e) {
+          var ico = e.kind === "dir" ? FOLDER : e.kind === "link" ? LINKI : FILE;
+          return '<div class="fentry ' + e.kind + '"' +
+            (e.kind === "dir" ? ' data-cd="' + esc(joinPath(path, e.name)) + '"' : "") + ">" +
+            ico + '<span class="fn">' + esc(e.name) +
+            (e.target ? ' -> ' + esc(e.target) : "") + "</span>" +
+            '<span class="fsz">' + (e.kind === "file" ? fmtBytes(e.size) : "") + "</span></div>";
+        }).join("") || '<div class="empty">empty directory</div>';
+        $$("#filebrowser [data-cd]").forEach(function (row) {
+          row.addEventListener("click", function () { browseFiles(row.dataset.cd); });
+        });
+      }).catch(function () {
+        $("#filebrowser").innerHTML = '<div class="empty">could not list (needs root for app dirs)</div>';
+      });
+  }
+  function joinPath(base, name) {
+    return (base.replace(/\/+$/, "") || "") + "/" + name;
+  }
+  function parentPath(p) {
+    p = p.replace(/\/+$/, "");
+    var i = p.lastIndexOf("/");
+    return i <= 0 ? "/" : p.slice(0, i);
+  }
+  $("#fb-go").addEventListener("click", function () { browseFiles($("#fb-path").value || "/sdcard"); });
+  $("#fb-up").addEventListener("click", function () { browseFiles(parentPath($("#fb-path").value || "/sdcard")); });
+  $("#fb-path").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") browseFiles(this.value || "/sdcard");
+  });
+  $("#ev-go").addEventListener("click", function () {
+    var hours = $("#ev-hours").value;
+    $("#ev-result").textContent = "exporting…";
+    fetch("/api/export/evidence?hours=" + hours).then(function (r) { return r.json(); })
+      .then(function (d) {
+        $("#ev-result").innerHTML = "Saved " + d.alerts + " alerts, " + d.events +
+          " events.<br>" + esc(d.path) + "<br>sha256 " + esc((d.sha256 || "").slice(0, 16)) + "…";
+      }).catch(function () { $("#ev-result").textContent = "export failed"; });
+  });
+
   setInterval(function () { if (currentTab === "alerts" || currentTab === "monitor") loadAlerts(); }, 20000);
   setInterval(function () {
     fetch("/api/netstats").then(function (r) { return r.json(); })
@@ -488,6 +640,7 @@
       if (ev.data && ev.data.ip) alertedIPs[ev.data.ip] = 1;
       loadAlerts(); pollStatus();
     }
+    if (ev.kind === "app.backup" && currentTab === "storage") loadBackups();
   }
 
   var wsRetry = 1000;

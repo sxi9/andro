@@ -54,9 +54,18 @@ class DemoCollector(Collector):
                   "version": 100 + i, "version_name": f"1.{i}", "sig": "deadbeef",
                   "system": False,
                   "requested": ["android.permission.INTERNET", "android.permission.CAMERA"],
-                  "granted": ["android.permission.INTERNET"],
+                  "granted": ["android.permission.INTERNET"]
+                  + (["android.permission.RECORD_AUDIO", "android.permission.READ_SMS"]
+                     if pkg in ("com.led.qrflash", "com.wx.weatherpro") else []),
                   "last_update": "2026-10-01 10:00:00"}
             for i, (pkg, uid) in enumerate(APPS)
+        }
+        ctx.state["storage"] = {
+            "apps": {pkg: {"app": (12 + i * 3) * 1024 * 1024,
+                           "data": (20 + i * 11) * 1024 * 1024,
+                           "cache": (3 + i) * 1024 * 1024}
+                     for i, (pkg, uid) in enumerate(APPS)},
+            "totals": {"data_free": 18 * 1024 ** 3, "cache_free": 2 * 1024 ** 3},
         }
         # a couple of one-shot scripted findings so the alerts tab has substance
         scripted = [

@@ -201,15 +201,18 @@ def test_csrf_guard_blocks_cross_origin_posts(client):
     r = client.post("/api/appmanager/action", json={"action": "launch", "package": PKG},
                     headers={"Origin": "http://evil.example"})
     assert r.status_code == 403 and r.json() == {"error": "cross-origin request blocked"}
-    for origin in ("http://127.0.0.1:8765", "http://localhost:8765", "http://[::1]:8765"):
-        r = client.post("/api/root/request", json={}, headers={"Origin": origin})
+    # same-origin = the authority the browser is talking to (its Host), so a
+    # port-forwarded or proxied dashboard keeps working
+    for origin, host in (("http://127.0.0.1", "127.0.0.1"), ("http://localhost", "localhost"),
+                         ("http://127.0.0.1:8765", "127.0.0.1:8765"), ("http://localhost:9000", "localhost:9000")):
+        r = client.post("/api/root/request", json={}, headers={"Origin": origin, "Host": host})
         assert r.status_code == 400, origin                 # same-origin passes to the demo refusal
     assert client.get("/api/root", headers={"Origin": "http://evil.example"}).status_code == 200
 
 
 @pytest.mark.parametrize("origin", [
     "http://localhost:3000",        # another local port: a dev server's page is cross-origin
-    "http://127.0.0.1",             # port 80, not ours
+    "http://127.0.0.1:8765",        # the request's Host is 127.0.0.1 (port 80): another port
     "https://127.0.0.1:8765",       # scheme differs
     "http://localhost.evil.example:8765",
     "http://127.0.0.1:x",
@@ -217,7 +220,7 @@ def test_csrf_guard_blocks_cross_origin_posts(client):
 ])
 def test_csrf_guard_is_port_and_scheme_aware(client, origin):
     # a multipart form POST needs no preflight, so the guard must compare the
-    # whole origin against the server's own bind, not just the hostname
+    # whole origin against the request's own authority, not just the hostname
     r = client.post("/api/appmanager/install",
                     files={"file": ("x.apk", b"PK", "application/octet-stream")},
                     data={"options": "{}"}, headers={"Origin": origin})

@@ -565,10 +565,21 @@ def create_app(cfg: Config) -> FastAPI:
         _local_hosts.add(cfg.host)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(_local_hosts))
 
-    def _origin_ok(origin: str | None) -> bool:
-        # The Origin must be this server itself (scheme, host and port): a page
-        # on another local port (a dev server, another tool) is cross-origin to
-        # the browser, and a multipart form POST from it needs no preflight.
+    def _authority(host: str | None) -> tuple[str, int | None]:
+        # "127.0.0.1:8765" / "[::1]:9000" / "localhost" -> (hostname, port)
+        try:
+            u = urlparse("http://" + (host or ""))
+            return (u.hostname or "").lower(), (u.port if u.port is not None else 80)
+        except ValueError:
+            return "", None
+
+    def _origin_ok(origin: str | None, host: str | None) -> bool:
+        # The Origin must be the page the browser is talking to: same scheme,
+        # host and port as the request's own Host (which a cross-site page
+        # cannot set). A page on another local port (a dev server, another
+        # tool) is cross-origin, and its multipart form POST needs no
+        # preflight. Comparing to Host rather than the bind port keeps
+        # port-forwarded / proxied dashboards working.
         if not origin:
             return True
         try:
@@ -576,7 +587,8 @@ def create_app(cfg: Config) -> FastAPI:
             port = u.port if u.port is not None else {"http": 80, "https": 443}.get(u.scheme)
         except ValueError:
             return False
-        return u.scheme == "http" and (u.hostname or "") in _local_hosts and port == cfg.port
+        hname = (u.hostname or "").lower()
+        return u.scheme == "http" and hname in _local_hosts and (hname, port) == _authority(host)
 
     @app.middleware("http")
     async def _csrf_guard(request, call_next):
@@ -585,7 +597,7 @@ def create_app(cfg: Config) -> FastAPI:
         # the attacker's Origin and is rejected; same-origin dashboard calls and
         # non-browser clients (no Origin) pass.
         if request.method not in ("GET", "HEAD", "OPTIONS"):
-            if not _origin_ok(request.headers.get("origin")):
+            if not _origin_ok(request.headers.get("origin"), request.headers.get("host")):
                 return JSONResponse({"error": "cross-origin request blocked"},
                                     status_code=403)
         return await call_next(request)
@@ -1304,7 +1316,7 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------- WebSocket ----------
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
-        if not _origin_ok(sock.headers.get("origin")):
+        if not _origin_ok(sock.headers.get("origin"), sock.headers.get("host")):
             await sock.close(code=4403)
             return
         await sock.accept()

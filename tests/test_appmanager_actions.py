@@ -513,10 +513,13 @@ def _settings_ctx():
 
 def test_kill_refuses_core_system_uids_even_for_a_shared_uid_package():
     c = _settings_ctx()
-    for pid in (1234, 2222, 5555):
+    for pid in (1234, 2222):   # system_server / a HAL on uid 1000: never
         r = run_action(c, "kill", {"package": "com.android.settings", "pid": pid, "confirm": True})
         assert r["ok"] is False and "core system" in r["output"], (pid, r)
     assert not any(cmd.startswith("kill") for cmd in c.shell_cmds())
+    # the package's own process on that uid (what the detail pane lists) may be killed
+    r = run_action(c, "kill", {"package": "com.android.settings", "pid": 5555, "confirm": True})
+    assert r["ok"] is True and "kill -9 5555" in c.shell_cmds()
     # a plain app uid whose process is (mis)named like the platform is refused too
     c = Ctx(responses={"ps -A": f"PID UID RSS NAME\n77 {UID} 100 system_server\n78 {UID} 100 zygote\n"})
     for pid in (77, 78):

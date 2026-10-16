@@ -474,11 +474,15 @@ def _named_after(name: str, pkg: str, process: str | None = None) -> bool:
     return base == pkg or (bool(process) and name == process)
 
 
-def _core_process(uid: int, name: str) -> bool:
-    """A process that must never be killed through an app: anything on a core
-    system uid, and the zygotes / system_server even if mislabelled."""
+def _core_process(uid: int, name: str, pkg: str | None = None) -> bool:
+    """A process that must never be killed through an app: system_server and
+    the zygotes whatever they are called, and on a core system uid anything
+    that is not the package's own process (a platform app shares uid 1000
+    with system_server and the HALs)."""
     base = name.split(":", 1)[0]
-    return uid % 100000 < _FIRST_APP_UID or base == "system_server" or base.startswith("zygote")
+    if base == "system_server" or base.startswith("zygote"):
+        return True
+    return uid % 100000 < _FIRST_APP_UID and not (pkg and _named_after(name, pkg))
 
 
 def _frozen(st: dict) -> str | None:
@@ -967,7 +971,7 @@ def _h_kill(dctx, pkg, user, p):
         return {"ok": False, "output": f"pid {pid} belongs to uid {row[1]}, not to {pkg}"}
     # a platform package may share uid 1000 with system_server and the HALs:
     # the appId match alone would let kill -9 soft-reboot the device
-    if _core_process(row[1], row[3]):
+    if _core_process(row[1], row[3], pkg):
         return {"ok": False, "output": f"refusing to kill {row[3]} (pid {pid}): core system "
                                        f"process on uid {row[1]}"}
     return _cmd(dctx, f"kill -9 {pid}", su=True)

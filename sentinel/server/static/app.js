@@ -882,7 +882,7 @@
   /* ================= app manager ================= */
   var amApps = [], amWhich = "all", amLocal = null, amSel = null, amMeta = {}, amUser = null, amRows = {};
   var amDev = DEV, amPending = null;  // device the list belongs to; package to open after a reload
-  var amListPending = false;
+  var amListPending = false, amReopen = null;
   var amHandlers = null, amHandlersKey = "";  // "Defaults on this device", cached per device + user
   var amAutoDone = {}, amResolveIv = null;
   var amChecked = {};                  // package -> 1: ticked rows for the bulk bar
@@ -981,6 +981,15 @@
           if (amRows[p]) amSelect(p);
           else toast(shortApp(p) + " is not in this list", "warn", "try the uninstalled filter or All users");
         }
+        if (amReopen) {  // user/profile switch: re-open the shown app for that user, or quietly clear the pane
+          var rp = amReopen; amReopen = null;
+          if (amRows[rp]) amSelect(rp);
+          else {
+            amSel = null; $("#am-tabs").style.display = "none";
+            $("#am-dtitle").textContent = "App details"; $("#am-dsub").textContent = "select an app";
+            $("#am-dbody").innerHTML = '<div class="empty">Pick an app on the left.</div>';
+          }
+        }
         if (!amSel) loadAmDefaults();
         maybeAutoResolve(d);
       })
@@ -991,7 +1000,7 @@
   }
   $("#am-user").addEventListener("change", function () {
     amUser = this.value === "all" ? "all" : parseInt(this.value, 10);
-    amPending = amSel;  // the pane is per user: re-open the shown app once the new list is in
+    amReopen = amSel;  // the pane is per user: re-open the shown app once the new list is in
     loadAppManager();
   });
   // the list endpoint does not know which apps have a process: one /running read per list load
@@ -1031,7 +1040,7 @@
     var multi = (amMeta.users || []).length > 1;
     var rows = amApps.filter(function (a) {
       if (amLocal === "running" && !amRunning[a.package]) return false;
-      if (amLocal === "frozen" && a.enabled) return false;
+      if (amLocal === "frozen" && a.enabled && !a.maybe_hidden) return false;
       if (!q) return true;
       return a.package.toLowerCase().indexOf(q) >= 0 ||
         (a.label || "").toLowerCase().indexOf(q) >= 0;
@@ -1255,7 +1264,11 @@
     users.reduce(function (chain, u) {
       return chain.then(function () {
         return postJSON("/api/appmanager/batch", { device: DEV, action: action, packages: byUser[u], user: parseInt(u, 10),
-          confirm: destructive, options: options || {} }).then(function (res) { out.push(res); });
+          confirm: destructive, options: options || {} })
+          .catch(function (err) {  // one failed group becomes FAIL lines; the others still render
+            return { ok: false, status: 0, j: { output: "request failed" + (err && err.message ? ": " + err.message : "") } };
+          })
+          .then(function (res) { out.push(res); });
       });
     }, Promise.resolve())
       .then(function () { renderAmResults(box, action, users.length === 1 ? out[0] : amMergeBatch(out, users, byUser)); amAfterBulk(); })

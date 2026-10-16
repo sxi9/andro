@@ -28,6 +28,7 @@
       <button data-tab="network"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>Network &amp; Data</button>
       <button data-tab="privacy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>Mic · Cam · Location</button>
       <button data-tab="apps"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Apps &amp; Permissions</button>
+      <button data-tab="appmgr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v5"/></svg>App Manager</button>
       <button data-tab="logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h16v16H4z"/><path d="M8 9h4M8 13h8M8 17h6"/></svg>Logcat</button>
       <button data-tab="radio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 15.8a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/><path d="M12 19V9"/></svg>Cellular &amp; Radio</button>
       <button data-tab="storage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2M4 7v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7M8 11h8M8 15h5"/></svg>Files &amp; Storage</button>
@@ -46,6 +47,7 @@
       <button data-tab="network">Network</button>
       <button data-tab="privacy">Privacy</button>
       <button data-tab="apps">Apps</button>
+      <button data-tab="appmgr">Manager</button>
       <button data-tab="logs">Logcat</button>
       <button data-tab="radio">Cellular</button>
       <button data-tab="storage">Files</button>
@@ -220,6 +222,32 @@
         <div class="card pad0" style="margin-top:14px">
           <div class="ch"><h3>Radio log</h3><span class="hint">logcat -b radio</span></div>
           <div class="logview" id="radiolog" style="max-height:340px"></div>
+        </div>
+      </section>
+
+      <!-- APP MANAGER -->
+      <section class="panel" data-panel="appmgr">
+        <div class="am-layout">
+          <div class="card pad0 am-list">
+            <div class="ch"><h3>All apps</h3><span class="tiphint" data-tip="Every installed package, system and user. Filter by type, search by name or package, and click an app for full details and actions.">?</span>
+              <div class="chips-filter" id="am-filter">
+                <button class="on" data-which="all">all</button>
+                <button data-which="user">user</button>
+                <button data-which="system">system</button>
+                <button data-which="disabled">disabled</button>
+              </div>
+            </div>
+            <div class="toolbar"><input id="am-search" type="search" placeholder="Search apps…" autocomplete="off"></div>
+            <div class="applist" id="am-applist" style="max-height:620px"><div class="empty">loading apps…</div></div>
+          </div>
+          <div class="card pad0 am-detail" id="am-detail">
+            <div class="ch"><h3 id="am-dtitle">App details</h3><span class="hint">select an app</span></div>
+            <div id="am-dbody"><div class="empty">Pick an app on the left to see its permissions, components, app-ops, signature and storage, and to manage it.</div></div>
+          </div>
+        </div>
+        <div class="note">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+          <span>Actions run on the selected device over your own ADB. Disable, Clear data and Uninstall change the device and ask for confirmation first. Everything stays local.</span>
         </div>
       </section>
 

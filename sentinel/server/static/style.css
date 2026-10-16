@@ -281,13 +281,12 @@ tbody tr.rowlink{cursor:pointer}
 .pill.link{cursor:pointer}
 .pill.link:hover{border-color:var(--accent);color:var(--accent)}
 
-/* tooltips: <el data-tip="..."> */
-[data-tip]{position:relative}
-[data-tip]:hover::after{content:attr(data-tip);position:absolute;z-index:60;left:0;top:calc(100% + 7px);
-  max-width:290px;width:max-content;background:var(--bg-elev2);color:var(--fg);border:1px solid var(--border);
-  border-radius:8px;padding:8px 11px;font-size:11.5px;line-height:1.5;font-family:var(--ff-body);
-  font-weight:400;text-transform:none;letter-spacing:0;white-space:normal;box-shadow:0 6px 24px rgba(0,0,0,.35);
-  pointer-events:none}
+/* tooltips: <el data-tip="..."> — rendered into #tipbox, a fixed-position
+   singleton (see app.js), so overflow/scroll containers cannot clip them */
+#tipbox{position:fixed;display:none;z-index:120;max-width:290px;background:var(--bg-elev2);color:var(--fg);
+  border:1px solid var(--border);border-radius:8px;padding:8px 11px;font-size:11.5px;line-height:1.5;
+  font-family:var(--ff-body);font-weight:400;text-transform:none;letter-spacing:0;white-space:normal;
+  box-shadow:0 6px 24px rgba(0,0,0,.35);pointer-events:none}
 .tiphint{display:inline-grid;place-items:center;width:15px;height:15px;border-radius:50%;
   border:1px solid var(--border);color:var(--fg-mut);font-size:10px;font-family:var(--ff-mono);
   cursor:help;flex:0 0 15px}
@@ -295,17 +294,15 @@ tbody tr.rowlink{cursor:pointer}
 
 /* drag + collapse */
 .card{position:relative}
-.draggable-ready > .card > .dragh, .draggable-ready > .tile > .dragh{opacity:0}
 .dragh{position:absolute;top:8px;right:8px;width:20px;height:20px;display:grid;place-items:center;
   color:var(--fg-mut);cursor:grab;border-radius:5px;opacity:0;transition:opacity .12s;z-index:5;
   font-size:13px;letter-spacing:1px;user-select:none}
-.card:hover > .dragh{opacity:.85}
+:hover > .dragh{opacity:.85}  /* zone children are not always .card (e.g. column wrappers) */
 .dragh:hover{background:var(--bg-elev2);color:var(--fg)}
 .dragging{opacity:.45;outline:2px dashed var(--accent);outline-offset:2px}
-.dragover-before{box-shadow:-4px 0 0 0 var(--accent)}
-.dragover-after{box-shadow:4px 0 0 0 var(--accent)}
 .collapser{margin-left:auto;background:none;border:0;color:var(--fg-mut);cursor:pointer;
-  width:22px;height:22px;display:grid;place-items:center;border-radius:5px}
+  width:22px;height:22px;display:grid;place-items:center;border-radius:5px;
+  position:relative;z-index:6}  /* above .dragh (z 5), which overlaps the header corner */
 .collapser:hover{background:var(--bg-elev2);color:var(--fg)}
 .collapser svg{width:14px;height:14px;transition:transform .15s}
 .card.collapsed .collapser svg{transform:rotate(-90deg)}
@@ -324,11 +321,33 @@ tbody tr.rowlink{cursor:pointer}
 .toast .tmeta{font-size:11px;color:var(--fg-mut);font-family:var(--ff-mono);margin-top:3px}
 @keyframes toastin{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
 
-/* active drill-filter banner */
-.filterbar{display:none;align-items:center;gap:8px;padding:8px 15px;font-size:12px;
-  background:var(--accent-dim);border-bottom:1px solid var(--border-soft);color:var(--fg)}
-.filterbar.on{display:flex}
-.filterbar b{font-family:var(--ff-mono)}
-.filterbar button{margin-left:auto;background:none;border:1px solid var(--border);border-radius:20px;
-  color:var(--fg-dim);cursor:pointer;font-size:11px;padding:2px 10px}
 @media (max-width:880px){.gsearch input{width:130px}.gsearch input:focus{width:170px}}
+
+/* ---------- app manager ---------- */
+.am-layout{display:grid;grid-template-columns:minmax(300px,420px) 1fr;gap:14px;align-items:start}
+@media (max-width:980px){.am-layout{grid-template-columns:1fr}}
+.am-detail{position:sticky;top:0}
+.am-row{display:flex;gap:11px;align-items:center;padding:11px 15px;border-bottom:1px solid var(--border-soft);cursor:pointer}
+.am-row:last-child{border-bottom:0}
+.am-row:hover{background:var(--bg-elev)}
+.am-row.sel{background:var(--accent-dim)}
+.am-row .ai{width:34px;height:34px;flex:0 0 34px;border-radius:9px;display:grid;place-items:center;
+  font-family:var(--ff-disp);font-weight:700;font-size:13px;color:#fff;background:var(--accent-2)}
+.am-row .am-meta{min-width:0;flex:1}
+.am-row .am-nm{font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.am-row .am-pk{font-size:11px;color:var(--fg-mut);font-family:var(--ff-mono);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.am-sec{padding:13px 15px;border-bottom:1px solid var(--border-soft)}
+.am-sec:last-child{border-bottom:0}
+.am-sec h4{margin:0 0 9px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-mut);font-family:var(--ff-body)}
+.am-actions{display:flex;gap:7px;flex-wrap:wrap;padding:13px 15px;border-bottom:1px solid var(--border-soft)}
+.btn.danger{border-color:var(--crit);color:var(--crit)}
+.btn.danger:hover{background:var(--crit-dim)}
+.permrow{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;border-bottom:1px solid var(--border-soft)}
+.permrow:last-child{border-bottom:0}
+.permrow .pn{flex:1;min-width:0;font-family:var(--ff-mono);font-size:11.5px;word-break:break-all}
+.permrow .pg{font-size:10px;font-family:var(--ff-mono)}
+.opchips{display:flex;gap:6px;flex-wrap:wrap}
+.comp{font-size:11px;font-family:var(--ff-mono);padding:2px 7px;border-radius:5px;background:var(--bg-elev2);
+  color:var(--fg-dim);margin:2px 3px 0 0;display:inline-block;word-break:break-all}
+.comp.off{background:var(--crit-dim);color:var(--crit)}

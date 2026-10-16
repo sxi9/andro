@@ -18,7 +18,7 @@
     ["#feed-mon", "#feed-net", "#feed-priv"].forEach(function (s) {
       var el = $(s); if (el) el.innerHTML = '<div class="empty">switching device…</div>';
     });
-    sysLogs = []; radioLogs = []; destStats = {};
+    sysLogs = []; radioLogs = []; destStats = {}; alertedIPs = {};
     seenIds = {};
     pollStatus();
     refreshCurrentTab();
@@ -32,6 +32,7 @@
     else if (currentTab === "devices") loadDevices();
     else if (currentTab === "logs") renderLogs();
     else if (currentTab === "radio") renderRadioLog();
+    else if (currentTab === "network") { renderFlow(); renderDestTable(); }
   }
 
   /* ---------- theme ---------- */
@@ -52,6 +53,7 @@
     network: ["Network & Data", "Every connection, where it lands, how much leaves the device"],
     privacy: ["Mic · Cam · Location", "Sensor access with foreground / background attribution"],
     apps: ["Apps & Permissions", "Inventory, god-mode access and dangerous grants"],
+    appmgr: ["App Manager", "Every app, with full details and owner controls"],
     logs: ["Logcat", "System log attributed to the owning app"],
     radio: ["Cellular & Radio", "Telephony state, serving cell and the radio log"],
     storage: ["Files & Storage", "Per-app storage, the file browser, and app extraction"],
@@ -72,6 +74,8 @@
     if (tab === "radio") renderRadioLog();
     if (tab === "storage") loadStorage();
     if (tab === "devices") loadDevices();
+    if (tab === "appmgr") loadAppManager();
+    if (tab === "network") { renderFlow(); renderDestTable(); }
     var gs = $("#gsearch");
     if (gs) {
       gs.placeholder = "Search " + (titles[tab] ? titles[tab][0].toLowerCase() : "this tab");
@@ -195,6 +199,7 @@
     });
     $("#logview").innerHTML = out.map(logLineHTML).join("") ||
       '<div class="empty">no matching lines</div>';
+    applyGlobalSearch();
   }
   $("#logsearch").addEventListener("input", function () {
     curSearch = this.value.toLowerCase(); renderLogs();
@@ -212,10 +217,7 @@
     b.addEventListener("click", function () {
       $$("#transportseg button").forEach(function (x) { x.classList.remove("on"); });
       b.classList.add("on"); curTransport = b.dataset.tr;
-      $$("#feed-net .ev").forEach(function (row) {
-        row.style.display = (curTransport === "all" ||
-          row.dataset.transport === curTransport) ? "" : "none";
-      });
+      $$("#feed-net .ev").forEach(function (row) { applyRowFilters(row, "feed-net"); });
     });
   });
 
@@ -262,7 +264,9 @@
       '<text class="nm" x="' + cx + '" y="' + (cy + 52) + '" text-anchor="middle">this device</text></g>';
     svg.innerHTML = h;
   }
-  setInterval(function () { renderFlow(); renderDestTable(); }, 5000);
+  setInterval(function () {
+    if (currentTab === "network") { renderFlow(); renderDestTable(); }
+  }, 5000);
 
   /* ---------- sensor cards (privacy tab) ---------- */
   var sensorLast = {};  // kind -> ev
@@ -347,6 +351,7 @@
     $("#r-ci").textContent = cell.ci != null ? cell.ci : "—";
     $("#r-tac").textContent = cell.tac != null ? cell.tac : "—";
     renderSensorCards(cam);
+    applyGlobalSearch();  // #nowlist was rebuilt; re-apply the active filter
   }
   function pollStatus() {
     fetch(dq("/api/status")).then(function (r) { return r.json(); })
@@ -459,6 +464,7 @@
         inspectApp(row.dataset.app);
       });
     });
+    applyGlobalSearch();
   }
   $("#appsearch").addEventListener("input", renderApps);
   $("#appsort").addEventListener("change", renderApps);
@@ -515,6 +521,7 @@
         });
       });
     });
+    applyGlobalSearch();
   }
   $$("#alertsev button").forEach(function (b) {
     b.addEventListener("click", function () {
@@ -579,6 +586,11 @@
   function inspectApp(pkg) {
     var card = $("#appstorage-card");
     card.style.display = "";
+    if (card.classList.contains("collapsed")) {
+      card.classList.remove("collapsed");
+      collapsed["c:storage:" + card.id] = false;
+      saveJSON("sentinel-collapsed", collapsed);
+    }
     $("#as-title").textContent = "App storage: " + shortApp(pkg);
     $("#appstorage").innerHTML = '<div class="empty">reading ' + esc(pkg) + " …</div>";
     card.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -742,6 +754,7 @@
     $$("#devlist [data-disconnect]").forEach(function (b) {
       b.addEventListener("click", function () { adbPost("/api/adb/disconnect", { host_port: b.dataset.disconnect }, "#adb-out2"); });
     });
+    applyGlobalSearch();
   }
 
   function loadDevices() {
@@ -796,6 +809,151 @@
     });
   })();
 
+  /* ================= app manager ================= */
+  var amApps = [], amWhich = "all", amSel = null;
+  function loadAppManager() {
+    $("#am-applist").innerHTML = '<div class="empty">loading apps…</div>';
+    fetch(dq("/api/appmanager/list?which=" + amWhich)).then(function (r) { return r.json(); })
+      .then(function (d) { amApps = d.apps || []; renderAmList(); })
+      .catch(function () { $("#am-applist").innerHTML = '<div class="empty">could not load apps</div>'; });
+  }
+  function renderAmList() {
+    var q = ($("#am-search").value || "").toLowerCase();
+    var rows = amApps.filter(function (a) {
+      return !q || a.package.toLowerCase().indexOf(q) >= 0;
+    });
+    $("#am-applist").innerHTML = rows.map(function (a) {
+      var init = shortApp(a.package).slice(0, 2).toUpperCase();
+      return '<div class="am-row" data-pkg="' + esc(a.package) + '">' +
+        '<div class="ai"' + (a.system ? ' style="background:var(--fg-mut)"' : "") + ">" + esc(init) + "</div>" +
+        '<div class="am-meta"><div class="am-nm">' + esc(shortApp(a.package)) +
+        (a.system ? ' <span class="pill mut">system</span>' : "") +
+        (!a.enabled ? ' <span class="pill warn">disabled</span>' : "") +
+        (a.godmode ? ' <span class="pill crit">god-mode</span>' : "") + "</div>" +
+        '<div class="am-pk">' + esc(a.package) + "</div></div>" +
+        (a.data_size ? '<span class="fsz">' + fmtBytes(a.data_size) + "</span>" : "") + "</div>";
+    }).join("") || '<div class="empty">' + (q ? "no match" : "no apps") + "</div>";
+    $$("#am-applist .am-row").forEach(function (row) {
+      row.addEventListener("click", function () {
+        $$("#am-applist .am-row").forEach(function (x) { x.classList.remove("sel"); });
+        row.classList.add("sel");
+        loadAmDetail(row.dataset.pkg);
+      });
+    });
+    if (amSel) {
+      var s = $('#am-applist .am-row[data-pkg="' + CSS.escape(amSel) + '"]');
+      if (s) s.classList.add("sel");
+    }
+    applyGlobalSearch();
+  }
+  $("#am-search").addEventListener("input", renderAmList);
+  $$("#am-filter button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      $$("#am-filter button").forEach(function (x) { x.classList.remove("on"); });
+      b.classList.add("on");
+      amWhich = b.dataset.which;
+      loadAppManager();
+    });
+  });
+
+  function loadAmDetail(pkg) {
+    amSel = pkg;
+    $("#am-dtitle").textContent = shortApp(pkg);
+    $("#am-dbody").innerHTML = '<div class="empty">reading ' + esc(pkg) + " …</div>";
+    fetch(dq("/api/appmanager/app/" + encodeURIComponent(pkg))).then(function (r) { return r.json(); })
+      .then(renderAmDetail).catch(function () {
+        $("#am-dbody").innerHTML = '<div class="empty">could not read this app</div>';
+      });
+  }
+
+  var DESTRUCTIVE_AM = { disable: 1, "clear-data": 1, uninstall: 1 };
+  function amAction(action, params) {
+    var destructive = !!DESTRUCTIVE_AM[action];
+    if (destructive && typeof confirm === "function" &&
+        !confirm("This will " + action.replace("-", " ") + " " +
+          shortApp(params.package) + " on the device. Continue?")) return;
+    var body = Object.assign({ device: DEV, confirm: destructive }, params, { action: action });
+    fetch("/api/appmanager/action", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      toast((res.ok ? "" : "Failed: ") + action + " — " + (res.output || "").split("\n")[0],
+            res.ok ? "good" : "warn");
+      setTimeout(function () { if (amSel) loadAmDetail(amSel); }, 600);
+    }).catch(function () { toast("action failed", "crit"); });
+  }
+  // one delegated handler for all action buttons in the detail pane
+  $("#am-dbody").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-act]");
+    if (!b) return;
+    amAction(b.dataset.act, {
+      package: b.dataset.pkg, permission: b.dataset.perm, op: b.dataset.op, mode: b.dataset.mode,
+    });
+  });
+
+  function renderAmDetail(d) {
+    var det = d.detail || {};
+    var pkg = d.package;
+    var gy = function (k, v) { return v == null || v === "" ? "" : "<dt>" + esc(k) + "</dt><dd>" + esc(v) + "</dd>"; };
+    var ident = '<div class="am-sec"><h4>Identity</h4><dl class="kv2" style="padding:0">' +
+      gy("package", pkg) + gy("version", (det.version_name || "?") + " (" + (det.version || "?") + ")") +
+      gy("type", det.system ? "system" : "user app") +
+      gy("enabled", det.enabled ? "yes" : "no — disabled") +
+      gy("installer", det.installer || "unknown") +
+      gy("target SDK", det.target_sdk) + gy("min SDK", det.min_sdk) + gy("ABI", det.abi) +
+      gy("installed", det.first_install) + gy("updated", det.last_update) +
+      gy("data dir", det.data_dir) + gy("signature", det.sig) +
+      "</dl></div>";
+
+    var ap = ' data-pkg="' + esc(pkg) + '"';
+    var actions = '<div class="am-actions">' +
+      (det.enabled
+        ? '<button class="btn danger" data-act="disable"' + ap + ">Disable</button>"
+        : '<button class="btn" data-act="enable"' + ap + ">Enable</button>") +
+      '<button class="btn" data-act="force-stop"' + ap + ">Force stop</button>" +
+      '<button class="btn" data-act="clear-cache"' + ap + ">Clear cache</button>" +
+      '<button class="btn danger" data-act="clear-data"' + ap + ">Clear data</button>" +
+      '<button class="btn danger" data-act="uninstall"' + ap + ">Uninstall</button>" +
+      "</div>";
+
+    var granted = det.granted || [], requested = det.requested || [];
+    var gset = {};
+    granted.forEach(function (p) { gset[p] = 1; });
+    var perms = '<div class="am-sec"><h4>Permissions (' + granted.length + " of " + requested.length + " granted)</h4>" +
+      (requested.length ? requested.map(function (p) {
+        var on = gset[p];
+        var danger = DANGEROUS.indexOf(p.split(".").pop()) >= 0;
+        return '<div class="permrow"><span class="pn' + (danger ? '" style="color:var(--crit)' : "") + '">' +
+          esc(p.replace("android.permission.", "")) + "</span>" +
+          '<span class="pill ' + (on ? "good" : "mut") + '">' + (on ? "granted" : "denied") + "</span>" +
+          '<button class="btn" data-act="' + (on ? "revoke" : "grant") +
+          '" data-pkg="' + esc(pkg) + '" data-perm="' + esc(p) + '">' +
+          (on ? "revoke" : "grant") + "</button></div>";
+      }).join("") : '<div class="empty">no permissions declared</div>') + "</div>";
+
+    var ops = d.appops || [];
+    var opsec = '<div class="am-sec"><h4>App-ops activity</h4>' +
+      (ops.length ? '<div class="opchips">' + ops.map(function (o) {
+        return '<span class="pill ' + (o.background ? "crit" : "good") + '">' + esc(o.op) +
+          (o.background ? " · bg" : "") + "</span>";
+      }).join("") + "</div>" : '<div class="empty" style="padding:6px 0">no recent sensor/op access recorded</div>') + "</div>";
+
+    var dc = det.disabled_components || [], ec = det.enabled_components || [];
+    var comps = (dc.length || ec.length)
+      ? '<div class="am-sec"><h4>Component overrides</h4>' +
+        dc.map(function (c) { return '<span class="comp off" title="disabled">' + esc(c.split(".").pop()) + "</span>"; }).join("") +
+        ec.map(function (c) { return '<span class="comp" title="force-enabled">' + esc(c.split(".").pop()) + "</span>"; }).join("") +
+        "</div>"
+      : "";
+
+    var godsec = (d.godmode && d.godmode.length)
+      ? '<div class="am-sec"><h4>God-mode access</h4>' +
+        d.godmode.map(function (g) { return '<span class="pill crit">' + esc(g) + "</span> "; }).join("") + "</div>"
+      : "";
+
+    $("#am-dbody").innerHTML = actions + ident + godsec + perms + opsec + comps;
+  }
+
   /* ================= product polish ================= */
 
   /* ---- toasts ---- */
@@ -812,6 +970,33 @@
       setTimeout(function () { el.remove(); }, 350);
     }, 4200);
   }
+
+  /* ---- tooltips: [data-tip] rendered into a fixed singleton so overflow
+         containers (.card.pad0, .applist, collapsed cards) cannot clip them ---- */
+  var tipbox = document.createElement("div");
+  tipbox.id = "tipbox";
+  document.body.appendChild(tipbox);
+  var tipTarget = null;
+  function hideTip() { tipTarget = null; tipbox.style.display = "none"; }
+  document.addEventListener("mouseover", function (e) {
+    var t = e.target && e.target.closest ? e.target.closest("[data-tip]") : null;
+    if (t === tipTarget) return;
+    if (!t) { hideTip(); return; }
+    tipTarget = t;
+    tipbox.textContent = t.getAttribute("data-tip") || "";
+    tipbox.style.display = "block";
+    var r = t.getBoundingClientRect();
+    var x = Math.max(8, Math.min(r.left, window.innerWidth - tipbox.offsetWidth - 8));
+    var y = r.bottom + 7;
+    if (y + tipbox.offsetHeight > window.innerHeight - 8)
+      y = Math.max(8, r.top - tipbox.offsetHeight - 7);
+    tipbox.style.left = x + "px";
+    tipbox.style.top = y + "px";
+  });
+  document.addEventListener("mouseout", function (e) {
+    if (!e.relatedTarget) hideTip();  // pointer left the window
+  });
+  document.addEventListener("scroll", function () { if (tipTarget) hideTip(); }, true);
 
   /* ---- global search: filters whatever the current tab shows ---- */
   function gQuery() {
@@ -922,36 +1107,48 @@
 
   /* ---- top destinations table (sortable, click to filter) ---- */
   var destSort = { col: "count", dir: -1 };
+  var lastDestHTML = null;
   function renderDestTable() {
+    var tbody = $("#desttbl tbody");
+    if (!tbody) return;
     var rows = Object.keys(destStats).map(function (k) { return destStats[k]; });
-    if (!rows.length) return;
-    rows.sort(cmpBy(destSort, {
-      host: function (d) { return (d.label || "").toLowerCase(); },
-      count: function (d) { return d.count || 0; },
-      tracker: function (d) { return d.tracker || ""; },
-      last: function (d) { return d.last || 0; },
-    }));
+    var html;
+    if (!rows.length) {
+      // keep the table honest after a device switch: show the placeholder
+      html = '<tr><td colspan="4" class="empty">destinations appear as traffic flows</td></tr>';
+    } else {
+      rows.sort(cmpBy(destSort, {
+        host: function (d) { return (d.label || "").toLowerCase(); },
+        count: function (d) { return d.count || 0; },
+        tracker: function (d) { return d.tracker || ""; },
+        last: function (d) { return d.last || 0; },
+      }));
+      html = rows.slice(0, 80).map(function (d) {
+        return '<tr class="rowlink" data-host="' + esc(d.label) +
+          '" title="Click to filter the connection feed to this destination">' +
+          '<td class="mono" style="font-size:12px;word-break:break-all">' + esc(d.label) +
+          (d.alerted ? ' <span class="pill crit">alerted</span>' : "") + "</td>" +
+          '<td class="mono tnum">' + d.count + "</td>" +
+          "<td>" + (d.tracker ? '<span class="pill info">' + esc(d.tracker) + "</span>"
+            : '<span style="color:var(--fg-mut)">—</span>') + "</td>" +
+          '<td class="mono tnum">' + fmtTime(d.last) + "</td></tr>";
+      }).join("");
+    }
     paintSortArrows("#desttbl", destSort);
-    $("#desttbl tbody").innerHTML = rows.slice(0, 80).map(function (d) {
-      return '<tr class="rowlink" data-host="' + esc(d.label) +
-        '" title="Click to filter the connection feed to this destination">' +
-        '<td class="mono" style="font-size:12px;word-break:break-all">' + esc(d.label) +
-        (d.alerted ? ' <span class="pill crit">alerted</span>' : "") + "</td>" +
-        '<td class="mono tnum">' + d.count + "</td>" +
-        "<td>" + (d.tracker ? '<span class="pill info">' + esc(d.tracker) + "</span>"
-          : '<span style="color:var(--fg-mut)">—</span>') + "</td>" +
-        '<td class="mono tnum">' + fmtTime(d.last) + "</td></tr>";
-    }).join("");
-    $$("#desttbl tbody tr").forEach(function (tr) {
-      tr.addEventListener("click", function () {
-        $("#gsearch").value = tr.dataset.host;
-        applyGlobalSearch();
-        toast("Filtering to " + tr.dataset.host, "", "clear the search box to see everything again");
-      });
-    });
+    if (html === lastDestHTML) return;  // unchanged: keep DOM, selection and hover intact
+    lastDestHTML = html;
+    tbody.innerHTML = html;
     applyGlobalSearch();
   }
   wireSortable("#desttbl", destSort, renderDestTable);
+  // one delegated listener: survives every repaint, no mid-click listener loss
+  $("#desttbl tbody").addEventListener("click", function (e) {
+    var tr = e.target && e.target.closest ? e.target.closest("tr.rowlink") : null;
+    if (!tr || !tr.dataset.host) return;
+    $("#gsearch").value = tr.dataset.host;
+    applyGlobalSearch();
+    toast("Filtering to " + tr.dataset.host, "", "clear the search box to see everything again");
+  });
 
   /* ---- click a feed row -> open that app ---- */
   ["#feed-mon", "#feed-net", "#feed-priv"].forEach(function (sel) {
@@ -1006,7 +1203,15 @@
           handle.title = "Drag to rearrange this panel";
           child.style.position = "relative";
           child.appendChild(handle);
-          handle.addEventListener("mousedown", function () { child.draggable = true; });
+          handle.addEventListener("mousedown", function () {
+            child.draggable = true;
+            // a click with no drag must not leave the card drag-armed
+            // (draggable=true hijacks text selection inside the card)
+            document.addEventListener("mouseup", function armOff() {
+              document.removeEventListener("mouseup", armOff);
+              child.draggable = false;
+            });
+          });
           child.addEventListener("dragstart", function (e) {
             draggedEl = child;
             child.classList.add("dragging");

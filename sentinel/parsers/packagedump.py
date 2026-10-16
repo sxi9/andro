@@ -43,7 +43,16 @@ _REQ_PERM = re.compile(r"^\s+([A-Za-z][A-Za-z0-9_.\-]+)(?::.*)?$")
 _SECTION_END = re.compile(r"^\s*(install permissions:|runtime permissions:|User \d|"
                           r"declared permissions:|usesOptionalLibraries|libraries:|"
                           r"usesLibraries|dataDir=|timeStamp=|signatures=|splits=|"
-                          r"enabled=|lastUpdateTime=)")
+                          r"enabled=|lastUpdateTime=|disabledComponents|enabledComponents)")
+_DATA_DIR = re.compile(r"\bdataDir=(\S+)")
+_TARGET_SDK = re.compile(r"\btargetSdk=(\d+)")
+_MIN_SDK = re.compile(r"\bminSdk=(\d+)")
+_FIRST_INSTALL = re.compile(r"\bfirstInstallTime=([\d\- :.]+)")
+_ENABLED = re.compile(r"\benabled=(\d+)")
+_ABI = re.compile(r"\bprimaryCpuAbi=(\S+)")
+_COMP = re.compile(r"^\s+([A-Za-z][A-Za-z0-9_.$]+)\s*$")
+# package enabled states: 0 default, 1 enabled -> on; 2/3/4 disabled -> off
+_ENABLED_ON = {"0", "1"}
 
 
 def parse_packages_dump(text: str) -> dict[str, dict[str, Any]]:
@@ -56,6 +65,7 @@ def parse_packages_dump(text: str) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     cur: dict[str, Any] | None = None
     in_requested = False
+    in_section = None  # "disabledComponents" | "enabledComponents"
 
     for line in text.splitlines():
         h = _PKG_HDR.match(line)
@@ -63,12 +73,23 @@ def parse_packages_dump(text: str) -> dict[str, dict[str, Any]]:
             cur = out.setdefault(h.group(1), {
                 "version": None, "version_name": None, "installer": None,
                 "system": False, "sig": None, "last_update": None,
+                "first_install": None, "data_dir": None, "target_sdk": None,
+                "min_sdk": None, "abi": None, "enabled": True,
                 "requested": [], "granted": [],
+                "disabled_components": [], "enabled_components": [],
             })
             in_requested = False
+            in_section = None
             continue
         if cur is None:
             continue
+
+        if in_section:
+            m = _COMP.match(line)
+            if m and "." in m.group(1):
+                cur[in_section].append(m.group(1))
+                continue
+            in_section = None  # fall through to normal parsing
 
         if in_requested:
             if _SECTION_END.match(line) or _PKG_HDR.match(line) or not line.strip():
@@ -82,6 +103,31 @@ def parse_packages_dump(text: str) -> dict[str, dict[str, Any]]:
         if _REQ_HDR.match(line):
             in_requested = True
             continue
+        if line.strip().startswith("disabledComponents:"):
+            in_section = "disabled_components"
+            continue
+        if line.strip().startswith("enabledComponents:"):
+            in_section = "enabled_components"
+            continue
+
+        m = _ENABLED.search(line)
+        if m:
+            cur["enabled"] = m.group(1) in _ENABLED_ON
+        m = _DATA_DIR.search(line)
+        if m and cur["data_dir"] is None:
+            cur["data_dir"] = m.group(1)
+        m = _TARGET_SDK.search(line)
+        if m and cur["target_sdk"] is None:
+            cur["target_sdk"] = int(m.group(1))
+        m = _MIN_SDK.search(line)
+        if m and cur["min_sdk"] is None:
+            cur["min_sdk"] = int(m.group(1))
+        m = _ABI.search(line)
+        if m and cur["abi"] is None and m.group(1) != "null":
+            cur["abi"] = m.group(1)
+        m = _FIRST_INSTALL.search(line)
+        if m and cur["first_install"] is None:
+            cur["first_install"] = m.group(1).strip()
 
         m = _VERSION.search(line)
         if m and cur["version"] is None:

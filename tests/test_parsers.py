@@ -432,3 +432,74 @@ def test_validate_host_port():
                 "1.2.3.4:5555; rm -rf /", "$(reboot):5555", ""):
         with pytest.raises(AdbError):
             validate_host_port(bad)
+
+
+# ---------------- package dump: components + enabled (App Manager) ----------------
+
+PKG_DUMP_COMP = """\
+Packages:
+  Package [com.led.qrflash] (ff00):
+    userId=10501
+    versionCode=7 minSdk=21 targetSdk=33
+    versionName=1.7
+    dataDir=/data/data/com.led.qrflash
+    primaryCpuAbi=arm64-v8a
+    firstInstallTime=2026-09-01 12:00:00
+    lastUpdateTime=2026-10-10 09:00:00
+    pkgFlags=[ HAS_CODE ]
+    installSource: installerPackageName=null, initiatingPackageName=null
+    requested permissions:
+      android.permission.CAMERA
+      android.permission.INTERNET
+      android.permission.READ_SMS
+    runtime permissions:
+      android.permission.CAMERA: granted=true, flags=[ USER_SET ]
+      android.permission.READ_SMS: granted=false
+    disabledComponents:
+      com.led.qrflash.AdReceiver
+      com.led.qrflash.TrackerService
+    enabledComponents:
+      com.led.qrflash.MainActivity
+    User 0: ceDataInode=1 installed=true hidden=false enabled=2
+"""
+
+
+def test_packages_dump_components_and_enabled():
+    d = parse_packages_dump(PKG_DUMP_COMP)["com.led.qrflash"]
+    assert d["data_dir"] == "/data/data/com.led.qrflash"
+    assert d["target_sdk"] == 33 and d["min_sdk"] == 21
+    assert d["abi"] == "arm64-v8a"
+    assert d["first_install"] == "2026-09-01 12:00:00"
+    assert d["enabled"] is False            # enabled=2 -> disabled
+    assert "com.led.qrflash.AdReceiver" in d["disabled_components"]
+    assert "com.led.qrflash.TrackerService" in d["disabled_components"]
+    assert d["enabled_components"] == ["com.led.qrflash.MainActivity"]
+    assert "android.permission.CAMERA" in d["granted"]
+    assert "android.permission.READ_SMS" not in d["granted"]
+    assert "android.permission.READ_SMS" in d["requested"]
+
+
+def test_appmanager_action_validation():
+    from sentinel.service import appmanager
+    from sentinel.adb.client import AdbError
+    import pytest as _pt
+    # a fake dctx whose adb records the command instead of running it
+    class FakeAdb:
+        def __init__(self): self.last = None
+        def shell_sync(self, cmd, su=False, timeout=60): self.last = cmd; return "Success"
+    class FakeCtx:
+        def __init__(self): self.adb = FakeAdb(); self.state = {}
+    c = FakeCtx()
+    # injection attempt in package name is rejected
+    r = appmanager.run_action(c, "force-stop", {"package": "com.x; rm -rf /"})
+    assert r["ok"] is False and c.adb.last is None
+    # destructive without confirm is refused
+    r = appmanager.run_action(c, "uninstall", {"package": "com.x"})
+    assert r["ok"] is False and "confirm" in r["output"]
+    # valid grant builds a quoted pm command
+    r = appmanager.run_action(c, "grant",
+                              {"package": "com.x", "permission": "android.permission.CAMERA"})
+    assert "pm grant" in c.adb.last and "com.x" in c.adb.last
+    # bad appop mode rejected
+    r = appmanager.run_action(c, "appop", {"package": "com.x", "op": "CAMERA", "mode": "evil"})
+    assert r["ok"] is False

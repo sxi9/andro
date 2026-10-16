@@ -175,6 +175,43 @@ def _demo_app_storage(pkg: str) -> dict:
     }
 
 
+def _demo_app_list() -> list[dict]:
+    rows = [
+        ("com.whatsapp", False, True, "com.android.vending", 10155, 190, 44, False),
+        ("com.wx.weatherpro", False, True, None, 10412, 61, 23, True),
+        ("com.led.qrflash", False, False, None, 10501, 30, 12, True),
+        ("com.android.chrome", False, True, "com.android.vending", 10091, 310, 120, False),
+        ("com.android.settings", True, True, "(system)", 1000, 80, 40, False),
+        ("com.google.android.gms", True, True, "(system)", 10012, 420, 260, False),
+        ("com.android.vending", True, True, "(system)", 10013, 210, 150, False),
+    ]
+    return [{"package": p, "system": s, "enabled": e, "installer": i, "uid": u,
+             "data_size": d * 1024 * 1024, "apk_size": a * 1024 * 1024, "godmode": g}
+            for (p, s, e, i, u, d, a, g) in rows]
+
+
+def _demo_app_detail(pkg: str) -> dict:
+    return {
+        "package": pkg,
+        "detail": {
+            "version": 271024, "version_name": "2.26.4", "installer": "com.android.vending",
+            "system": False, "sig": "6a8b96e2", "last_update": "2026-10-01 10:00:00",
+            "first_install": "2025-02-11 08:00:00", "data_dir": f"/data/data/{pkg}",
+            "target_sdk": 34, "min_sdk": 24, "abi": "arm64-v8a", "enabled": True,
+            "requested": ["android.permission.INTERNET", "android.permission.CAMERA",
+                          "android.permission.RECORD_AUDIO", "android.permission.READ_CONTACTS"],
+            "granted": ["android.permission.INTERNET", "android.permission.CAMERA"],
+            "disabled_components": [f"{pkg}.AdReceiver"],
+            "enabled_components": [],
+        },
+        "appops": [{"op": "RECORD_AUDIO", "background": False, "rejected": False, "ago": 42},
+                   {"op": "CAMERA", "background": False, "rejected": False, "ago": 300}],
+        "godmode": [], "sizes": {"data": 48 * 1024 * 1024, "cache": 12 * 1024 * 1024,
+                                 "app": 44 * 1024 * 1024},
+        "apk_paths": [f"/data/app/~~x/{pkg}-y/base.apk"],
+    }
+
+
 def _demo_files(path: str) -> list[dict]:
     base = [("DCIM", "dir"), ("Download", "dir"), ("Android", "dir"), ("Pictures", "dir"),
             ("whatsapp.db", "file"), ("notes.txt", "file")]
@@ -542,6 +579,34 @@ def create_app(cfg: Config) -> FastAPI:
         device = body.get("device")
         serial = device if device else hub.default_serial()
         return _export_evidence(hub, serial, hours)
+
+    # ---------- app manager ----------
+    @app.get("/api/appmanager/list")
+    async def am_list(which: str = "all", device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"demo": True, "apps": _demo_app_list()}
+        from ..service import appmanager
+        return {"apps": await asyncio.to_thread(appmanager.list_apps, dctx, which)}
+
+    @app.get("/api/appmanager/app/{pkg}")
+    async def am_detail(pkg: str, device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"demo": True, **_demo_app_detail(pkg)}
+        from ..service import appmanager
+        return await asyncio.to_thread(appmanager.app_detail, dctx, pkg)
+
+    @app.post("/api/appmanager/action")
+    async def am_action(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return JSONResponse({"ok": False, "output": "needs a real device (not demo mode)"},
+                                status_code=400)
+        from ..service import appmanager
+        res = await asyncio.to_thread(appmanager.run_action, dctx,
+                                      str(body.get("action", "")), body)
+        return res
 
     # ---------- WebSocket ----------
     @app.websocket("/ws")

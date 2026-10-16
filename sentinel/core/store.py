@@ -58,15 +58,25 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
+        self._migrate()
         self._db.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after the first release (multi-device)."""
+        for table in ("events", "alerts"):
+            cols = {r[1] for r in self._db.execute(f"PRAGMA table_info({table})").fetchall()}
+            if "device" not in cols:
+                self._db.execute(f"ALTER TABLE {table} ADD COLUMN device TEXT")
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_events_device ON events(device)")
 
     # ---- events ----
     def add_event(self, ev: Event) -> Event:
         with self._lock:
             cur = self._db.execute(
-                "INSERT INTO events(ts,kind,severity,title,detail,app,uid,data) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO events(ts,kind,severity,title,detail,app,uid,data,device) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
                 (ev.ts, ev.kind, ev.severity, ev.title, ev.detail, ev.app, ev.uid,
-                 json.dumps(ev.data, default=str)),
+                 json.dumps(ev.data, default=str), ev.device),
             )
             self._db.commit()
             ev.id = cur.lastrowid
@@ -74,8 +84,8 @@ class Store:
 
     def events(self, *, kinds: list[str] | None = None, prefix: str | None = None,
                app: str | None = None, since: float | None = None,
-               limit: int = 200) -> list[dict[str, Any]]:
-        q = "SELECT id,ts,kind,severity,title,detail,app,uid,data FROM events"
+               device: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        q = "SELECT id,ts,kind,severity,title,detail,app,uid,data,device FROM events"
         where, args = [], []
         if kinds:
             where.append("kind IN (%s)" % ",".join("?" * len(kinds)))
@@ -89,6 +99,9 @@ class Store:
         if since is not None:
             where.append("ts >= ?")
             args.append(since)
+        if device:
+            where.append("device = ?")
+            args.append(device)
         if where:
             q += " WHERE " + " AND ".join(where)
         q += " ORDER BY id DESC LIMIT ?"
@@ -102,33 +115,41 @@ class Store:
         return {
             "id": r[0], "ts": r[1], "kind": r[2], "severity": r[3],
             "title": r[4], "detail": r[5], "app": r[6], "uid": r[7],
-            "data": json.loads(r[8] or "{}"),
+            "data": json.loads(r[8] or "{}"), "device": r[9],
         }
 
     # ---- alerts ----
     def add_alert(self, ev: Event) -> int:
         with self._lock:
             cur = self._db.execute(
-                "INSERT INTO alerts(ts,rule,severity,title,detail,app,data) VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO alerts(ts,rule,severity,title,detail,app,data,device) "
+                "VALUES(?,?,?,?,?,?,?,?)",
                 (ev.ts, ev.data.get("rule", "?"), ev.severity, ev.title, ev.detail,
-                 ev.app, json.dumps(ev.data, default=str)),
+                 ev.app, json.dumps(ev.data, default=str), ev.device),
             )
             self._db.commit()
             return int(cur.lastrowid or 0)
 
-    def alerts(self, *, state: str | None = "open", limit: int = 100) -> list[dict[str, Any]]:
-        q = "SELECT id,ts,rule,severity,title,detail,app,state,data FROM alerts"
-        args: list[Any] = []
+    def alerts(self, *, state: str | None = "open", limit: int = 100,
+               device: str | None = None) -> list[dict[str, Any]]:
+        q = "SELECT id,ts,rule,severity,title,detail,app,state,data,device FROM alerts"
+        where, args = [], []
         if state:
-            q += " WHERE state = ?"
+            where.append("state = ?")
             args.append(state)
+        if device:
+            where.append("device = ?")
+            args.append(device)
+        if where:
+            q += " WHERE " + " AND ".join(where)
         q += " ORDER BY id DESC LIMIT ?"
         args.append(max(1, min(int(limit), 1000)))
         with self._lock:
             rows = self._db.execute(q, args).fetchall()
         return [
             {"id": r[0], "ts": r[1], "rule": r[2], "severity": r[3], "title": r[4],
-             "detail": r[5], "app": r[6], "state": r[7], "data": json.loads(r[8] or "{}")}
+             "detail": r[5], "app": r[6], "state": r[7], "data": json.loads(r[8] or "{}"),
+             "device": r[9]}
             for r in rows
         ]
 

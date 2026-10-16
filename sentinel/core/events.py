@@ -40,6 +40,7 @@ class Event:
     data: dict[str, Any] = field(default_factory=dict)
     ts: float = field(default_factory=time.time)
     id: int | None = None           # set by the store
+    device: str | None = None       # adb serial of the device this came from
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +52,7 @@ class Event:
             "detail": self.detail,
             "app": self.app,
             "uid": self.uid,
+            "device": self.device,
             "data": self.data,
         }
 

@@ -20,6 +20,7 @@ class Config:
 
     # modes
     demo: bool = False               # run with a simulated device (no adb needed)
+    demo_devices: int = 2            # how many simulated devices in demo mode
 
     # polling cadences (seconds)
     poll_sensors: float = 1.5        # appops / camera service
@@ -59,6 +60,8 @@ def parse_args(argv: list[str] | None = None) -> Config:
     p.add_argument("--no-tcpdump", dest="tcpdump", action="store_false",
                    help="disable on-device packet capture (hostnames fall back to IP-only)")
     p.add_argument("--demo", action="store_true", help="run with simulated data, no device needed")
+    p.add_argument("--demo-devices", type=int, default=2,
+                   help="number of simulated devices in demo mode (default 2)")
     p.add_argument("--data-dir", type=Path, default=None)
     p.add_argument("--geoip-db", type=Path, default=None, help="optional GeoLite2 City/Country .mmdb file")
     p.add_argument("--asn-db", type=Path, default=None, help="optional GeoLite2 ASN .mmdb file")
@@ -66,7 +69,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
     cfg = Config(
         host=a.host, port=a.port, serial=a.serial, adb_path=a.adb_path,
-        use_su=a.use_su, tcpdump=a.tcpdump, demo=a.demo,
+        use_su=a.use_su, tcpdump=a.tcpdump, demo=a.demo, demo_devices=a.demo_devices,
         geoip_db=a.geoip_db, asn_db=a.asn_db,
     )
     if a.data_dir:

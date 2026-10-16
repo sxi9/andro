@@ -35,6 +35,7 @@
     <div class="navlabel">Defense</div>
     <nav class="nav" data-nav>
       <button data-tab="alerts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 0-6 6c0 5-2 6-2 6h16s-2-1-2-6a6 6 0 0 0-6-6Z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>Alerts &amp; Rules<span class="badge" id="abadge"></span></button>
+      <button data-tab="devices"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M11 18h2"/></svg>Devices &amp; ADB<span class="badge" id="dbadge"></span></button>
     </nav>
     <div class="railfoot">All data stays on this machine.<br>Own-device monitoring only.</div>
   </aside>
@@ -49,10 +50,12 @@
       <button data-tab="radio">Cellular</button>
       <button data-tab="storage">Files</button>
       <button data-tab="alerts">Alerts</button>
+      <button data-tab="devices">Devices</button>
     </div>
 
     <div class="topbar">
       <div><h2 id="ttl">Live Activity</h2><div class="sub" id="sub">Unified timeline of everything the device is doing</div></div>
+      <select id="devpick" class="devpick" title="Monitored device" aria-label="Select device"></select>
       <div class="live off" id="wsstate"><span class="dot"></span><span id="wstext">CONNECTING</span></div>
       <button class="iconbtn" id="theme" title="Toggle theme" aria-label="Toggle theme">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19"/></svg>
@@ -252,6 +255,54 @@
             <div class="ch"><h3>Detection rules</h3><span class="hint">toggle on / off</span></div>
             <div id="rulelist"></div>
           </div>
+        </div>
+      </section>
+
+      <!-- DEVICES & ADB -->
+      <section class="panel" data-panel="devices">
+        <div class="grid tiles">
+          <div class="card tile"><div class="k">Monitored now</div><div class="v tnum" id="t-mon">0</div><div class="d">USB + wireless, no limit</div></div>
+          <div class="card tile"><div class="k">Seen by ADB</div><div class="v tnum" id="t-seen">0</div><div class="d" id="t-notready">all ready</div></div>
+          <div class="card tile"><div class="k">ADB server</div><div class="v" id="t-adbver" style="font-size:15px;font-family:var(--ff-mono)">—</div><div class="d">on this computer</div></div>
+        </div>
+
+        <div class="card pad0" style="margin-top:14px">
+          <div class="ch"><h3>Devices</h3><span class="hint">live state, with what to do about it</span></div>
+          <div id="devlist"><div class="empty">scanning for devices…</div></div>
+        </div>
+
+        <div class="cols" style="margin-top:14px">
+          <div class="card">
+            <div class="sectitle" style="margin-top:0">ADB server controls</div>
+            <p style="font-size:12.5px;color:var(--fg-dim);margin:2px 0 12px">If a device is stuck on "offline" or "waiting", restart the ADB server. This is the kill switch for the local adb daemon; it does not touch your phone.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn p" id="adb-restart">Restart ADB</button>
+              <button class="btn" id="adb-kill">Kill server</button>
+              <button class="btn" id="adb-start">Start server</button>
+              <button class="btn" id="adb-reconnect">Reconnect offline</button>
+            </div>
+            <div id="adb-out" class="mono" style="font-size:11.5px;color:var(--fg-mut);margin-top:11px;white-space:pre-wrap;word-break:break-all"></div>
+          </div>
+          <div class="card">
+            <div class="sectitle" style="margin-top:0">Wireless debugging</div>
+            <p style="font-size:12.5px;color:var(--fg-dim);margin:2px 0 10px">Android 11+: on the phone, Developer options → Wireless debugging. Use <b>Pair</b> with the pairing ip:port and 6-digit code once, then <b>Connect</b> with the main ip:port shown on the Wireless debugging screen.</p>
+            <div style="display:flex;flex-direction:column;gap:7px">
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <input id="pair-hp" placeholder="pair ip:port" class="adbin">
+                <input id="pair-code" placeholder="code" class="adbin" style="max-width:90px" inputmode="numeric">
+                <button class="btn" id="adb-pair">Pair</button>
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <input id="conn-hp" placeholder="connect ip:port (e.g. 192.168.1.42:5555)" class="adbin">
+                <button class="btn p" id="adb-connect">Connect</button>
+              </div>
+            </div>
+            <div id="adb-out2" class="mono" style="font-size:11.5px;color:var(--fg-mut);margin-top:11px;white-space:pre-wrap;word-break:break-all"></div>
+          </div>
+        </div>
+        <div class="note">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+          <span>"waiting for device" almost always means the phone shows as <b>unauthorized</b> (tap Allow on the phone) or <b>offline</b> (Restart ADB). Each device below says exactly which.</span>
         </div>
       </section>
     </div>

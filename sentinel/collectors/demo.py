@@ -36,14 +36,19 @@ TAGS = ["ActivityManager", "CameraService", "AppOps", "ConnectivityService",
 class DemoCollector(Collector):
     name = "demo"
 
+    def __init__(self, ctx, model: str | None = None) -> None:
+        super().__init__(ctx)
+        self.model = model or ctx.device.get("model") or "Pixel 7 (demo)"
+
     async def run(self) -> None:
         ctx = self.ctx
         ctx.state["demo"] = True
-        ctx.state["transport"] = "wifi"
-        ctx.device.update({"connected": True, "model": "Pixel 7 (demo)",
-                           "android": "14", "sdk": "34", "root": True,
-                           "manufacturer": "Google", "serial": "demo",
-                           "wireless": False})
+        wireless = ":" in ctx.serial
+        ctx.state["transport"] = "cellular" if wireless else "wifi"
+        ctx.device.update({"connected": True, "model": self.model,
+                           "android": ctx.device.get("android", "14"), "sdk": "34",
+                           "root": True, "manufacturer": "Demo",
+                           "serial": ctx.serial, "wireless": wireless})
         ctx.state["godmode"] = {
             "accessibility": ["com.led.qrflash"],
             "notification listener": ["com.facebook.katana"],

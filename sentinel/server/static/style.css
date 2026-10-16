@@ -99,6 +99,7 @@ button{font-family:inherit}
 .pill.warn{color:var(--warn);border-color:var(--warn);background:var(--warn-dim)}
 .pill.crit{color:var(--crit);border-color:var(--crit);background:var(--crit-dim)}
 .pill.info{color:var(--info);border-color:var(--info);background:var(--info-dim)}
+.pill.mut{color:var(--fg-dim)}
 
 .cols{display:grid;grid-template-columns:1.4fr 1fr;gap:14px}
 .cols3{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
@@ -217,6 +218,24 @@ tr:hover td{background:var(--bg-elev)}
 .srow .act{display:flex;gap:6px}
 .kv2{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12px;font-family:var(--ff-mono);padding:12px 15px}
 .kv2 dt{color:var(--fg-mut)} .kv2 dd{margin:0;word-break:break-all}
+
+.devpick{margin-left:auto;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);
+  color:var(--fg);padding:7px 10px;font-size:12.5px;font-family:var(--ff-mono);max-width:240px}
+.devpick:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.adbin{background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);
+  padding:7px 10px;font-size:12.5px;font-family:var(--ff-mono);flex:1;min-width:120px}
+.adbin:focus{outline:2px solid var(--accent);outline-offset:-1px}
+
+.devrow{display:flex;gap:13px;align-items:flex-start;padding:13px 15px;border-bottom:1px solid var(--border-soft)}
+.devrow:last-child{border-bottom:0}
+.devrow .dled{width:10px;height:10px;border-radius:50%;flex:0 0 10px;margin-top:5px;background:var(--fg-mut)}
+.devrow.ready .dled{background:var(--good);box-shadow:0 0 0 3px var(--good-dim)}
+.devrow.bad .dled{background:var(--crit);box-shadow:0 0 0 3px var(--crit-dim)}
+.devrow .dbody{flex:1;min-width:0}
+.devrow .dnm{font-weight:600;font-size:13.5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.devrow .dser{font-size:11.5px;color:var(--fg-mut);font-family:var(--ff-mono);margin-top:1px;word-break:break-all}
+.devrow .drsn{font-size:12px;color:var(--fg-dim);margin-top:5px}
+.devrow .dact{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}
 
 .mtabs{display:none}
 @media (max-width:880px){

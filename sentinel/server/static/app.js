@@ -4,6 +4,36 @@
   var $ = function (s, r) { return (r || document).querySelector(s); };
   var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
 
+  /* ---------- selected device ---------- */
+  var DEV = null;  // adb serial of the device currently shown; null = server default
+  try { DEV = localStorage.getItem("sentinel-device") || null; } catch (e) {}
+  function dq(url) {
+    if (!DEV) return url;
+    return url + (url.indexOf("?") >= 0 ? "&" : "?") + "device=" + encodeURIComponent(DEV);
+  }
+  function setDevice(serial) {
+    DEV = serial || null;
+    try { if (DEV) localStorage.setItem("sentinel-device", DEV); else localStorage.removeItem("sentinel-device"); } catch (e) {}
+    // device-scoped views must be reloaded and feeds cleared
+    ["#feed-mon", "#feed-net", "#feed-priv"].forEach(function (s) {
+      var el = $(s); if (el) el.innerHTML = '<div class="empty">switching device…</div>';
+    });
+    sysLogs = []; radioLogs = []; destStats = {};
+    seenIds = {};
+    pollStatus();
+    refreshCurrentTab();
+    fetch(dq("/api/events?limit=60")).then(function (r) { return r.json(); })
+      .then(function (evs) { (evs || []).reverse().forEach(routeEvent); }).catch(function () {});
+  }
+  function refreshCurrentTab() {
+    if (currentTab === "apps") loadApps();
+    else if (currentTab === "alerts") { loadAlerts(); loadRules(); }
+    else if (currentTab === "storage") loadStorage();
+    else if (currentTab === "devices") loadDevices();
+    else if (currentTab === "logs") renderLogs();
+    else if (currentTab === "radio") renderRadioLog();
+  }
+
   /* ---------- theme ---------- */
   try {
     var savedTheme = localStorage.getItem("sentinel-theme");
@@ -26,6 +56,7 @@
     radio: ["Cellular & Radio", "Telephony state, serving cell and the radio log"],
     storage: ["Files & Storage", "Per-app storage, the file browser, and app extraction"],
     alerts: ["Alerts & Rules", "What tripped, and the detections watching your device"],
+    devices: ["Devices & ADB", "Every device ADB sees, their state, and connection controls"],
   };
   var currentTab = "monitor";
   function go(tab) {
@@ -40,6 +71,7 @@
     if (tab === "logs") renderLogs();
     if (tab === "radio") renderRadioLog();
     if (tab === "storage") loadStorage();
+    if (tab === "devices") loadDevices();
   }
   $$("[data-nav] button").forEach(function (b) {
     b.addEventListener("click", function () { go(b.dataset.tab); });
@@ -290,7 +322,7 @@
     renderSensorCards(cam);
   }
   function pollStatus() {
-    fetch("/api/status").then(function (r) { return r.json(); })
+    fetch(dq("/api/status")).then(function (r) { return r.json(); })
       .then(applyStatus).catch(function () {});
   }
   setInterval(pollStatus, 8000);
@@ -333,7 +365,7 @@
     "ACCESS_BACKGROUND_LOCATION", "READ_CONTACTS", "READ_CALL_LOG", "SYSTEM_ALERT_WINDOW",
     "REQUEST_INSTALL_PACKAGES", "QUERY_ALL_PACKAGES"];
   function loadApps() {
-    fetch("/api/apps").then(function (r) { return r.json(); }).then(function (apps) {
+    fetch(dq("/api/apps")).then(function (r) { return r.json(); }).then(function (apps) {
       $("#t-apps").textContent = apps.length;
       var god = 0, side = 0;
       var h = apps.map(function (a) {
@@ -369,7 +401,7 @@
 
   /* ---------- alerts + rules ---------- */
   function loadAlerts() {
-    fetch("/api/alerts?state=open").then(function (r) { return r.json(); }).then(function (alerts) {
+    fetch(dq("/api/alerts?state=open")).then(function (r) { return r.json(); }).then(function (alerts) {
       (alerts || []).forEach(function (a) {
         if (a.data && a.data.ip) alertedIPs[a.data.ip] = 1;
       });
@@ -404,7 +436,7 @@
     }).catch(function () {});
   }
   function loadRules() {
-    fetch("/api/rules").then(function (r) { return r.json(); }).then(function (rules) {
+    fetch(dq("/api/rules")).then(function (r) { return r.json(); }).then(function (rules) {
       $("#rulelist").innerHTML = (rules || []).map(function (r) {
         return '<div class="approw" style="padding:11px 15px"><div class="appmeta">' +
           '<div class="nm" style="font-weight:500;font-size:13px">' + esc(r.name) +
@@ -434,7 +466,7 @@
   var LINKI = '<svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/></svg>';
 
   function loadStorage() {
-    fetch("/api/apps").then(function (r) { return r.json(); }).then(function (apps) {
+    fetch(dq("/api/apps")).then(function (r) { return r.json(); }).then(function (apps) {
       var rows = apps.slice().sort(function (a, b) {
         return (b.data_size || 0) - (a.data_size || 0);
       });
@@ -447,7 +479,7 @@
           '<td class="mono tnum">' + fmtBytes(a.cache_size) + "</td>" +
           '<td class="mono tnum">' + fmtBytes(a.apk_size) + "</td>" +
           '<td><div class="act"><button class="btn" data-inspect="' + esc(a.package) + '">inspect</button>' +
-          '<button class="btn p" data-backup="' + esc(a.package) + '">extract</button></div></td></tr>";
+          '<button class="btn p" data-backup="' + esc(a.package) + '">extract</button></div></td></tr>';
       }).join("") || '<tr><td colspan="5" class="empty">no app storage data yet (needs a device)</td></tr>';
       $$("#storagetbl [data-inspect]").forEach(function (b) {
         b.addEventListener("click", function () { inspectApp(b.dataset.inspect); });
@@ -457,7 +489,7 @@
       });
     }).catch(function () {});
 
-    fetch("/api/storage").then(function (r) { return r.json(); }).then(function (s) {
+    fetch(dq("/api/storage")).then(function (r) { return r.json(); }).then(function (s) {
       var apps = s.apps || {}, total = 0;
       Object.keys(apps).forEach(function (k) { total += (apps[k].data || 0) + (apps[k].app || 0); });
       $("#t-appdata").textContent = total ? fmtBytes(total) : "—";
@@ -475,7 +507,7 @@
     $("#as-title").textContent = "App storage: " + shortApp(pkg);
     $("#appstorage").innerHTML = '<div class="empty">reading ' + esc(pkg) + " …</div>";
     card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    fetch("/api/storage/app/" + encodeURIComponent(pkg)).then(function (r) { return r.json(); })
+    fetch(dq("/api/storage/app/" + encodeURIComponent(pkg))).then(function (r) { return r.json(); })
       .then(function (d) {
         var sizes = d.sizes || {};
         var sub = d.subdirs || {};
@@ -503,7 +535,7 @@
   }
 
   function startBackup(pkg) {
-    fetch("/api/backup/" + encodeURIComponent(pkg), {
+    fetch(dq("/api/backup/" + encodeURIComponent(pkg)), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ apk: true, data: true, external: false }),
     }).then(function (r) { return r.json(); }).then(function (res) {
@@ -519,7 +551,7 @@
   }
 
   function loadBackups() {
-    fetch("/api/backups").then(function (r) { return r.json(); }).then(function (b) {
+    fetch(dq("/api/backups")).then(function (r) { return r.json(); }).then(function (b) {
       $("#t-backups").textContent = (b || []).length;
       $("#backuplist").innerHTML = (b || []).map(function (x) {
         return '<div class="fentry"><span class="fn">' + esc(x.package || x.name) +
@@ -533,7 +565,7 @@
   function browseFiles(path) {
     $("#fb-path").value = path;
     $("#filebrowser").innerHTML = '<div class="empty">listing ' + esc(path) + " …</div>";
-    fetch("/api/files?path=" + encodeURIComponent(path)).then(function (r) { return r.json(); })
+    fetch(dq("/api/files?path=" + encodeURIComponent(path))).then(function (r) { return r.json(); })
       .then(function (d) {
         if (d.error) { $("#filebrowser").innerHTML = '<div class="empty">' + esc(d.error) + "</div>"; return; }
         var ents = d.entries || [];
@@ -568,7 +600,7 @@
   $("#ev-go").addEventListener("click", function () {
     var hours = $("#ev-hours").value;
     $("#ev-result").textContent = "exporting…";
-    fetch("/api/export/evidence?hours=" + hours).then(function (r) { return r.json(); })
+    fetch(dq("/api/export/evidence?hours=" + hours)).then(function (r) { return r.json(); })
       .then(function (d) {
         $("#ev-result").innerHTML = "Saved " + d.alerts + " alerts, " + d.events +
           " events.<br>" + esc(d.path) + "<br>sha256 " + esc((d.sha256 || "").slice(0, 16)) + "…";
@@ -577,10 +609,113 @@
 
   setInterval(function () { if (currentTab === "alerts" || currentTab === "monitor") loadAlerts(); }, 20000);
   setInterval(function () {
-    fetch("/api/netstats").then(function (r) { return r.json(); })
+    fetch(dq("/api/netstats")).then(function (r) { return r.json(); })
       .then(renderEgress).catch(function () {});
   }, 12000);
-  fetch("/api/netstats").then(function (r) { return r.json(); }).then(renderEgress).catch(function () {});
+  fetch(dq("/api/netstats")).then(function (r) { return r.json(); }).then(renderEgress).catch(function () {});
+
+  /* ---------- devices & ADB ---------- */
+  function populatePicker(data) {
+    var sel = $("#devpick");
+    var mon = (data.devices || []).filter(function (d) { return d.monitored; });
+    var want = (DEV && mon.some(function (d) { return d.serial === DEV; })) ? DEV
+      : (data.default || "");
+    sel.innerHTML = '<option value="">auto (' + (mon.length) + " device" +
+      (mon.length === 1 ? "" : "s") + ")</option>" +
+      mon.map(function (d) {
+        var s = d.summary || {};
+        return '<option value="' + esc(d.serial) + '">' +
+          esc(s.model || d.serial) + " · " + esc(s.transport || d.transport || "") + "</option>";
+      }).join("");
+    sel.value = DEV && mon.some(function (d) { return d.serial === DEV; }) ? DEV : "";
+    sel.style.display = mon.length > 1 ? "" : (mon.length ? "" : "none");
+  }
+
+  function renderDeviceList(data) {
+    var devs = data.devices || [];
+    $("#t-mon").textContent = data.count || 0;
+    $("#t-seen").textContent = devs.length;
+    $("#t-adbver").textContent = (data.adb_version || "").replace("Android Debug Bridge version", "").trim() || "—";
+    var notReady = devs.filter(function (d) { return !d.ready; }).length;
+    $("#t-notready").textContent = notReady ? (notReady + " need attention") : "all ready";
+    $("#dbadge").textContent = notReady ? notReady : "";
+    if (currentTab !== "devices") return;
+    $("#devlist").innerHTML = devs.map(function (d) {
+      var s = d.summary || {};
+      var cls = d.ready ? "ready" : "bad";
+      var acts = [];
+      if (d.ready && d.monitored) acts.push('<button class="btn p" data-view="' + esc(d.serial) + '">view</button>');
+      if (!d.ready) acts.push('<button class="btn" data-reconnect="' + esc(d.serial) + '">reconnect</button>');
+      if (d.transport === "wireless") acts.push('<button class="btn" data-disconnect="' + esc(d.serial) + '">disconnect</button>');
+      return '<div class="devrow ' + cls + '"><div class="dled"></div><div class="dbody">' +
+        '<div class="dnm">' + esc(s.model || d.model || d.serial) +
+        ' <span class="pill ' + (d.ready ? "good" : "crit") + '">' + esc(d.state || "?") + "</span>" +
+        ' <span class="pill mut">' + esc(d.transport || "") + "</span>" +
+        (s.android ? ' <span class="pill mut">Android ' + esc(s.android) + "</span>" : "") +
+        (s.root === false ? ' <span class="pill warn">no root</span>' : "") +
+        (d.monitored ? ' <span class="pill good">monitored</span>' : "") + "</div>" +
+        '<div class="dser">' + esc(d.serial) + "</div>" +
+        (d.ready ? "" : '<div class="drsn">' + esc(d.reason || "") + "</div>") +
+        (acts.length ? '<div class="dact">' + acts.join("") + "</div>" : "") +
+        "</div></div>";
+    }).join("") || '<div class="empty">no devices. Plug in over USB with debugging on, or connect wireless below.</div>';
+    $$("#devlist [data-view]").forEach(function (b) {
+      b.addEventListener("click", function () { setDevice(b.dataset.view); go("monitor"); });
+    });
+    $$("#devlist [data-reconnect]").forEach(function (b) {
+      b.addEventListener("click", function () { adbPost("/api/adb/reconnect", { serial: b.dataset.reconnect }, "#adb-out"); });
+    });
+    $$("#devlist [data-disconnect]").forEach(function (b) {
+      b.addEventListener("click", function () { adbPost("/api/adb/disconnect", { host_port: b.dataset.disconnect }, "#adb-out2"); });
+    });
+  }
+
+  function loadDevices() {
+    fetch("/api/devices").then(function (r) { return r.json(); })
+      .then(function (data) { populatePicker(data); renderDeviceList(data); })
+      .catch(function () {});
+  }
+  function pollDevices() { loadDevices(); }
+  setInterval(pollDevices, 5000);
+  loadDevices();
+
+  $("#devpick").addEventListener("change", function () { setDevice(this.value); });
+
+  function adbPost(path, body, outSel) {
+    var out = outSel ? $(outSel) : null;
+    if (out) out.textContent = "working…";
+    return fetch(path, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }).then(function (r) {
+      return r.json().then(function (j) { return { ok: r.ok, j: j }; });
+    }).then(function (res) {
+      var j = res.j || {};
+      if (out) out.textContent = (j.ok === false ? ("error: " + (j.error || "failed")) : (j.output || "done"));
+      setTimeout(pollDevices, 900);
+      return res;
+    }).catch(function () { if (out) out.textContent = "request failed"; });
+  }
+
+  (function wireAdb() {
+    var map = [
+      ["#adb-restart", "/api/adb/restart", function () { return {}; }, "#adb-out"],
+      ["#adb-kill", "/api/adb/kill", function () { return {}; }, "#adb-out"],
+      ["#adb-start", "/api/adb/start", function () { return {}; }, "#adb-out"],
+      ["#adb-reconnect", "/api/adb/reconnect", function () { return { offline: true }; }, "#adb-out"],
+    ];
+    map.forEach(function (m) {
+      var b = $(m[0]); if (b) b.addEventListener("click", function () { adbPost(m[1], m[2](), m[3]); });
+    });
+    var pair = $("#adb-pair");
+    if (pair) pair.addEventListener("click", function () {
+      adbPost("/api/adb/pair", { host_port: $("#pair-hp").value.trim(), code: $("#pair-code").value.trim() }, "#adb-out2");
+    });
+    var conn = $("#adb-connect");
+    if (conn) conn.addEventListener("click", function () {
+      adbPost("/api/adb/connect", { host_port: $("#conn-hp").value.trim() }, "#adb-out2");
+    });
+  })();
 
   /* ---------- initial feed backfill ---------- */
   // Buffer live WS events until the backfill has rendered, then replay them,
@@ -591,13 +726,16 @@
     wsBuffer.forEach(routeEvent);
     wsBuffer = [];
   }
-  fetch("/api/events?limit=60").then(function (r) { return r.json(); }).then(function (evs) {
+  fetch(dq("/api/events?limit=60")).then(function (r) { return r.json(); }).then(function (evs) {
     (evs || []).reverse().forEach(routeEvent);
     flushBuffer();
   }).catch(flushBuffer);
 
   /* ---------- websocket ---------- */
   function routeEvent(ev) {
+    // the WS carries every device; show only the selected one (device-less
+    // sentinel notices always pass)
+    if (DEV && ev.device && ev.device !== DEV) return;
     if (ev.id != null) {
       if (seenIds[ev.id]) return;
       if (Object.keys(seenIds).length > 5000) seenIds = {};

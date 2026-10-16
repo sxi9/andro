@@ -179,3 +179,38 @@ Everything stays on this computer. These features need root for app data dirs; t
 ## Per-app risk score
 
 Each app gets a 0-100 risk score blending god-mode access, dangerous permissions, sideload status, cellular egress and the SMS+internet combo. The Apps and Files tabs sort by it, so the apps worth reviewing float to the top.
+
+## Multiple devices, USB and wireless
+
+Sentinel monitors every connected device at once, USB and wireless together,
+with no cap. It polls `adb devices` and gives each ready device its own
+collectors, rules engine and hostname cache; events are tagged with the device
+serial and the dashboard scopes every tab to the device you pick in the header
+dropdown.
+
+### "waiting for device" when `adb devices` shows it
+
+That almost always means adb reports the device in a state that is not ready,
+and the old UI hid the reason. The **Devices & ADB** tab now shows every
+device adb sees with its exact state and what to do:
+
+- **unauthorized** — unlock the phone and tap Allow on the "Allow USB
+  debugging?" prompt (tick "Always allow"). No prompt? Toggle USB debugging
+  off and on, or revoke authorizations in Developer options.
+- **offline** — the connection is stale. Replug, press Reconnect, or
+  Restart ADB.
+- **no permissions** (Linux) — add an Android udev rule or run adb as a user
+  in the `plugdev` group, then Restart ADB.
+
+### ADB controls (in the Devices & ADB tab)
+
+- **Restart ADB** — the kill switch for the local adb server (kill + start).
+  Fixes most "offline"/"stuck" states without touching the phone.
+- **Reconnect offline**, plus per-device Reconnect / Disconnect.
+- **Wireless debugging** — Pair with the pairing `ip:port` and 6-digit code
+  (Android 11+), then Connect with the main `ip:port`. All inputs are
+  validated to `host:port`, so nothing shell-like is ever passed to adb.
+
+The dashboard is local-only: Host validation blocks DNS rebinding, the
+WebSocket checks Origin, and every state-changing request (ADB controls,
+backups, exports) is refused if it carries a cross-site Origin.

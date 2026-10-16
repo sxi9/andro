@@ -388,3 +388,47 @@ def test_parse_diskstats():
     assert d["apps"]["com.whatsapp"]["data"] == 52428800
     assert d["apps"]["com.led.qrflash"]["cache"] == 1048576
     assert d["totals"]["data_free"] == 4096000 * 1024
+
+
+# ---------------- adb device parsing + validation ----------------
+
+from sentinel.adb.client import AdbError, parse_devices_output, validate_host_port
+import pytest
+
+
+def test_parse_devices_all_states():
+    text = (
+        "List of devices attached\n"
+        "* daemon started successfully *\n"
+        "ABC123XYZ      device usb:1-1 product:panther model:Pixel_7 device:panther transport_id:1\n"
+        "EFG456         unauthorized usb:1-2\n"
+        "192.168.1.42:5555  offline\n"
+        "HIJ789 no permissions (udev rules)\n"
+        "adb-SERIAL-abcd._adb-tls-connect._tcp. device model:Galaxy_S23\n"
+    )
+    rows = parse_devices_output(text)
+    by = {r["serial"]: r for r in rows}
+    assert by["ABC123XYZ"]["state"] == "device" and by["ABC123XYZ"]["ready"] is True
+    assert by["ABC123XYZ"]["model"] == "Pixel 7" and by["ABC123XYZ"]["transport"] == "usb"
+    assert by["EFG456"]["state"] == "unauthorized" and by["EFG456"]["ready"] is False
+    assert by["192.168.1.42:5555"]["transport"] == "wireless"
+    assert by["HIJ789"]["state"] == "no permissions"
+    assert by["adb-SERIAL-abcd._adb-tls-connect._tcp."]["transport"] == "wireless"
+    # every non-ready row carries a human explanation
+    for r in rows:
+        if not r["ready"]:
+            assert r["reason"]
+
+
+def test_parse_devices_empty():
+    assert parse_devices_output("List of devices attached\n") == []
+    assert parse_devices_output("") == []
+
+
+def test_validate_host_port():
+    validate_host_port("192.168.1.42:5555")
+    validate_host_port("phone.local:40000")
+    for bad in ("192.168.1.42", "1.2.3.4:0", "1.2.3.4:99999",
+                "1.2.3.4:5555; rm -rf /", "$(reboot):5555", ""):
+        with pytest.raises(AdbError):
+            validate_host_port(bad)

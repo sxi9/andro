@@ -96,6 +96,15 @@ def parse_packages_dump(text: str) -> dict[str, dict[str, Any]]:
             continue
         if cur is None:
             continue
+        if line.strip() and not line[0].isspace():
+            # a top-level header ("Shared users:", "Queries:", ...) ends the
+            # Packages block: the shared-user section repeats "User N:" lines
+            # and permission lists for the whole uid, with none of the
+            # per-package state, and must not overwrite it
+            cur = None
+            in_requested = False
+            in_section = None
+            continue
 
         m = _USER_STATE.match(line)
         if m:

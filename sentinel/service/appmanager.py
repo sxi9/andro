@@ -18,21 +18,23 @@ import shlex
 
 from ..adb.client import AdbError
 from ..core.events import Event, SEV_NOTICE, SEV_WARN
-from ..parsers.appops import parse_appops
+from ..parsers.appops import parse_duration
 from ..parsers.packagedump import parse_packages_dump, parse_pm_list
 
 import re
 
-_PKG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.]{1,254}$")
+# \Z, not $: a bare $ also matches before a trailing newline, which the device
+# shell would treat as a command separator
+_PKG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.]{1,254}\Z")
 PKG_RE = _PKG
-_PERM = re.compile(r"^[A-Za-z0-9_.]{1,128}$")
-_OP = re.compile(r"^[A-Za-z0-9_:]{1,64}$")
-_COMPONENT = re.compile(r"^[A-Za-z0-9_.]{1,254}/[A-Za-z0-9_.$]{1,254}$")
+_PERM = re.compile(r"^[A-Za-z0-9_.]{1,128}\Z")
+_OP = re.compile(r"^[A-Za-z0-9_:]{1,64}\Z")
+_COMPONENT = re.compile(r"^[A-Za-z0-9_.]{1,254}/[A-Za-z0-9_.$]{1,254}\Z")
 _MODES = {"allow", "deny", "ignore", "default", "foreground"}
 # find-package query: never reaches a shell, but keep it boring anyway
-QUERY_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
+QUERY_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}\Z")
 # one "pkg/Component" result line of `pm query-activities --brief`
-_COMP_LINE = re.compile(r"^\s*([A-Za-z0-9_.]+)/([A-Za-z0-9_.$]+)\s*$")
+_COMP_LINE = re.compile(r"^\s*([A-Za-z0-9_.]+)/([A-Za-z0-9_.$]+)\s*\Z")
 
 # Fixed intent table for handlers(); constants only, never built from input.
 _INTENTS: dict[str, str] = {
@@ -51,7 +53,10 @@ _ROLES: dict[str, str] = {
 _APK_DIRS = ("/system/app", "/system/priv-app", "/product/app", "/product/priv-app",
              "/system_ext/app", "/system_ext/priv-app", "/vendor/app", "/apex")
 # /data/app entries that are package dirs: "<pkg>-<hash>" (not ~~hash, lib, oat)
-_DATA_APP_DIR = re.compile(r"^[A-Za-z0-9_.]+-[A-Za-z0-9_=-]+$")
+_DATA_APP_DIR = re.compile(r"^[A-Za-z0-9_.]+-[A-Za-z0-9_=-]+\Z")
+# app uids start at 10000; below that are core system uids (system_server,
+# HALs, radio...) that several platform packages share
+_FIRST_APP_UID = 10000
 
 
 class _Refused(AdbError):
@@ -90,6 +95,17 @@ def _has_root(dctx) -> bool:
     if not isinstance(dev, dict):
         dev = (getattr(dctx, "state", None) or {}).get("device") or {}
     return bool(dev.get("root"))
+
+
+def _sdk(dctx) -> int | None:
+    """API level from device_info() (`ro.build.version.sdk`, a string)."""
+    dev = getattr(dctx, "device", None)
+    if not isinstance(dev, dict):
+        dev = (getattr(dctx, "state", None) or {}).get("device") or {}
+    try:
+        return int(dev.get("sdk") or 0) or None
+    except (TypeError, ValueError):
+        return None
 
 
 _USER_LINE = re.compile(r"UserInfo\{(\d+):([^:}]*):")
@@ -188,6 +204,16 @@ def list_apps(dctx, which: str = "all", user: int | str | None = None,
     # the system flag is a property of the package, not of a user: one listing
     # (owner scope) is enough, -u so debloated system apps keep their flag
     system = _pm_set(adb, ("--user 0 " if user is None or every else f"--user {int(user)} ") + "-s -u")
+    # `pm hide` drops a package from the plain listing exactly like `pm
+    # uninstall --user` does, so the two are indistinguishable here without a
+    # dumpsys per package. A kept data dir is the cheap hint (one `ls` per
+    # user): hidden apps always keep theirs, uninstalled ones only with -k.
+    # The detail pane reads the real hidden flag from dumpsys.
+    maybe_hidden: set[str] = set()
+    if _has_root(dctx):
+        gone = [p for p in base if p not in where]
+        for uid in user_ids:
+            maybe_hidden |= _data_dirs_present(adb, 0 if uid is None else int(uid), gone)
     sizes = (dctx.state.get("storage") or {}).get("apps") or {}
     god = dctx.state.get("godmode") or {}
     god_pkgs = {p for pkgs in god.values() for p in pkgs}
@@ -212,6 +238,7 @@ def list_apps(dctx, which: str = "all", user: int | str | None = None,
             "enabled": enabled,
             "installed": is_installed,
             "users_installed": users_installed,
+            "maybe_hidden": not is_installed and pkg in maybe_hidden,
             "installer": b.get("installer"),
             "uid": b.get("uid"),
             "data_size": szd.get("data", 0),
@@ -227,6 +254,23 @@ def list_apps(dctx, which: str = "all", user: int | str | None = None,
             "users": users,
             "uninstalled": sum(1 for a in out if not a["installed"]),
             "labels_resolved": sum(1 for a in out if a["label_source"] == "apk")}
+
+
+def _data_dirs_present(adb, user: int, pkgs: list[str]) -> set[str]:
+    """Packages among pkgs that still have /data/user/<user>/<pkg> (root; one
+    `ls -d` per 200 names, missing paths are silent)."""
+    found: set[str] = set()
+    pkgs = [p for p in pkgs if _PKG.match(p)]
+    for i in range(0, len(pkgs), 200):
+        chunk = pkgs[i:i + 200]
+        paths = " ".join(shlex.quote(f"/data/user/{int(user)}/{p}") for p in chunk)
+        try:
+            out = adb.shell_sync(f"ls -d {paths} 2>/dev/null", su=True, timeout=30)
+        except AdbError:
+            continue
+        have = {ln.strip() for ln in out.splitlines()}
+        found |= {p for p in chunk if f"/data/user/{int(user)}/{p}" in have}
+    return found
 
 
 def _ls_paths(out: str) -> list[str]:
@@ -423,6 +467,20 @@ def _uid_for(dctx, pkg: str, user: int = 0) -> int:
     return uid
 
 
+def _named_after(name: str, pkg: str, process: str | None = None) -> bool:
+    """Is a ps NAME the package's own process ("pkg", "pkg:svc" or its declared
+    android:process)?"""
+    base = name.split(":", 1)[0]
+    return base == pkg or (bool(process) and name == process)
+
+
+def _core_process(uid: int, name: str) -> bool:
+    """A process that must never be killed through an app: anything on a core
+    system uid, and the zygotes / system_server even if mislabelled."""
+    base = name.split(":", 1)[0]
+    return uid % 100000 < _FIRST_APP_UID or base == "system_server" or base.startswith("zygote")
+
+
 def _frozen(st: dict) -> str | None:
     # 2/3/4 = disabled / disabled by user / disabled until used
     if st.get("enabled_state") in (2, 3, 4):
@@ -440,18 +498,55 @@ def links_for(pkg: str) -> dict:
             "exodus": f"https://reports.exodus-privacy.eu.org/en/reports/{pkg}/latest/"}
 
 
+_OP_GET = re.compile(r"^\s*(Uid mode: )?([A-Z][A-Z0-9_]+):\s*([a-z]+)(.*)$")
+_OP_TIME = re.compile(r"\btime=\+?([\w.]+) ago")
+_OP_REJECT = re.compile(r"\brejectTime=\+?([\w.]+) ago")
+
+
+def parse_appops_get(text: str) -> list[dict]:
+    """`appops get [--user N] <pkg>` -> [{op, mode, background, rejected, ago}].
+    Lines look like "CAMERA: allow; time=+3m2s ago; duration=+1s",
+    "READ_SMS: deny; rejectTime=+2m ago", "RUN_IN_BACKGROUND: ignore" or
+    "Uid mode: COARSE_LOCATION: foreground"; "No operations." means none.
+    A uid-level mode overrides the package mode, so it is carried as
+    uid_mode next to the package entry (or stands in when there is none)."""
+    by_op: dict[str, dict] = {}
+    for line in text.splitlines():
+        m = _OP_GET.match(line)
+        if not m:
+            continue
+        uid_level, op, mode, rest = bool(m.group(1)), m.group(2), m.group(3), m.group(4)
+        t = _OP_TIME.search(rest)
+        r = _OP_REJECT.search(rest)
+        ago = parse_duration(t.group(1)) if t else None
+        rej = parse_duration(r.group(1)) if r else None
+        times = [x for x in (ago, rej) if x is not None]
+        # the most recent event decides "rejected" and "ago"
+        row = {"op": op, "mode": mode, "background": False,
+               "rejected": rej is not None and (ago is None or rej <= ago),
+               "ago": round(min(times)) if times else None}
+        cur = by_op.get(op)
+        if uid_level:
+            row["uid_mode"] = mode
+            if cur is not None:
+                cur["uid_mode"] = mode
+                continue
+        elif cur is not None and "uid_mode" in cur:
+            row["uid_mode"] = cur["uid_mode"]
+        by_op[op] = row
+    return list(by_op.values())
+
+
 def app_detail(dctx, pkg: str, user: int = 0) -> dict:
     _vpkg(pkg)
     adb = dctx.adb
     dump = parse_packages_dump(adb.shell_sync(f"dumpsys package {shlex.quote(pkg)}", timeout=40))
     d = dump.get(pkg, {})
-    # app-ops state for this package
-    ops = []
+    # app-ops state for this package and user (`dumpsys appops <pkg>` is not a
+    # dumpsys argument: it answers "Unknown command")
     try:
-        for a in parse_appops(adb.shell_sync(f"dumpsys appops {shlex.quote(pkg)}", timeout=20)):
-            if a.package == pkg:
-                ops.append({"op": a.op, "background": a.background,
-                            "rejected": a.rejected, "ago": round(a.ago)})
+        ops = parse_appops_get(adb.shell_sync(
+            f"appops get --user {int(user)} {shlex.quote(pkg)}", timeout=20))
     except AdbError:
         ops = []
     sizes = (dctx.state.get("storage") or {}).get("apps") or {}
@@ -468,8 +563,11 @@ def app_detail(dctx, pkg: str, user: int = 0) -> dict:
     stats = dctx.state.get("netstats") or {}
     ns = stats.get(str(uid)) if uid is not None else None
     rows = _safe(lambda: _ps_rows(adb), [])
-    # match on appId so a work-profile instance (uid + 100000*user) counts too
-    mine = [r for r in rows if uid is not None and r[1] % 100000 == uid % 100000]
+    # match on appId so a work-profile instance (uid + 100000*user) counts too;
+    # a core uid (1000 = system_server and every android.uid.system package)
+    # is shared, so there only processes named after the package count
+    mine = [r for r in rows if uid is not None and r[1] % 100000 == uid % 100000
+            and (uid % 100000 >= _FIRST_APP_UID or _named_after(r[3], pkg, d.get("process")))]
     res = {
         "package": pkg,
         "detail": d,
@@ -478,7 +576,7 @@ def app_detail(dctx, pkg: str, user: int = 0) -> dict:
         "sizes": sizes.get(pkg, {}),
         "apk_paths": _safe(lambda: adb.apk_paths(pkg), []),
         "users_installed": users_installed,
-        "state": {"installed": bool(st.get("installed", pkg in users_installed)),
+        "state": {"installed": bool(st.get("installed", int(user) in users_installed)),
                   "hidden": bool(st.get("hidden")), "suspended": bool(st.get("suspended")),
                   "stopped": bool(st.get("stopped")),
                   "enabled_state": int(st.get("enabled_state", 0) or 0),
@@ -531,7 +629,11 @@ _APK_PATH = re.compile(r"^/(data|system|system_ext|product|vendor|apex)/.+\.apk$
 
 DESTRUCTIVE = {"disable", "clear-data", "uninstall", "freeze", "uninstall-updates",
                "appops-deny-dangerous", "deny-dangerous-perms", "firewall", "ifw-block",
-               "ifw-unblock", "block-trackers", "unblock-trackers", "prefs-set", "prefs-delete"}
+               "ifw-unblock", "block-trackers", "unblock-trackers", "prefs-set", "prefs-delete",
+               "kill"}
+# request params that may carry secrets (preference values, tokens...): the
+# app.action event keeps the key, never the content
+_SENSITIVE_PARAMS = ("value", "password", "token", "secret")
 
 
 def _ok(out: str) -> bool:
@@ -627,14 +729,14 @@ def _h_uninstall_updates(dctx, pkg, user, p):
 
 def _h_appops_deny_dangerous(dctx, pkg, user, p):
     q = shlex.quote(pkg)
-    return _cmd(dctx, "; ".join(f"appops set {q} {op} ignore" for op in _DANGEROUS_OPS))
+    return _cmd(dctx, "; ".join(f"appops set --user {user} {q} {op} ignore" for op in _DANGEROUS_OPS))
 
 
 def _h_prevent_background(dctx, pkg, user, p):
     mode = "ignore" if _vbool(p, "enabled") else "allow"
     q = shlex.quote(pkg)
-    a = _cmd(dctx, f"appops set {q} RUN_IN_BACKGROUND {mode}")
-    b = _cmd(dctx, f"appops set {q} RUN_ANY_IN_BACKGROUND {mode}")
+    a = _cmd(dctx, f"appops set --user {user} {q} RUN_IN_BACKGROUND {mode}")
+    b = _cmd(dctx, f"appops set --user {user} {q} RUN_ANY_IN_BACKGROUND {mode}")
     return {"ok": a["ok"] and b["ok"], "output": f"{a['output']}\n{b['output']}".strip()}
 
 
@@ -671,12 +773,18 @@ def _h_netpolicy(dctx, pkg, user, p):
     return _cmd(dctx, f"cmd netpolicy {verb} restrict-background-blacklist {uid}")
 
 
+def _sensor_user(user: int) -> str:
+    # sensorservice takes a trailing `--user N` and defaults to 0; only name a
+    # profile so the plain form keeps working on builds without the option
+    return f" --user {int(user)}" if int(user) else ""
+
+
 def _h_sensors(dctx, pkg, user, p):
     state = _venum(p, "state", _SENSOR_STATES)
     q = shlex.quote(pkg)
     if state == "reset":
-        return _cmd(dctx, f"cmd sensorservice reset-uid-state {q}")
-    return _cmd(dctx, f"cmd sensorservice set-uid-state {q} {state}")
+        return _cmd(dctx, f"cmd sensorservice reset-uid-state {q}{_sensor_user(user)}")
+    return _cmd(dctx, f"cmd sensorservice set-uid-state {q} {state}{_sensor_user(user)}")
 
 
 def _denylist_available(dctx) -> bool:
@@ -728,7 +836,8 @@ def _component_tags(dctx, pkg: str, cls: str) -> list[str]:
 
 def _ifw_read(dctx, pkg: str):
     import xml.etree.ElementTree as ET
-    raw = dctx.adb.exec_out_bytes(f"cat {_IFW_DIR}/{pkg}.xml 2>/dev/null", su=True, timeout=20)
+    raw = dctx.adb.exec_out_bytes(f"cat {shlex.quote(f'{_IFW_DIR}/{pkg}.xml')} 2>/dev/null",
+                                  su=True, timeout=20)
     if raw.strip():
         try:
             return ET.fromstring(raw)
@@ -737,10 +846,10 @@ def _ifw_read(dctx, pkg: str):
     return ET.Element("rules")
 
 
-def _ifw_update(dctx, pkg: str, comps: list[str], block: bool) -> dict:
+def _ifw_update(dctx, pkg: str, comps: list[str], block: bool, user: int = 0) -> dict:
     """Add or remove intent-firewall rules for components of pkg in one
     read-modify-write of /data/system/ifw/<pkg>.xml, then pm disable/enable
-    each component so it is off even where IFW does not apply."""
+    each component (for this user) so it is off even where IFW does not apply."""
     import xml.etree.ElementTree as ET
     from .appdata import write_device_file
     root = _ifw_read(dctx, pkg)
@@ -769,7 +878,7 @@ def _ifw_update(dctx, pkg: str, comps: list[str], block: bool) -> dict:
     outs, ok = [], True
     for name in comps:
         try:
-            r = _cmd(dctx, f"pm {verb} {shlex.quote(name)}", su=True)
+            r = _cmd(dctx, f"pm {verb} --user {int(user)} {shlex.quote(name)}", su=True)
         except AdbError as e:
             r = {"ok": False, "output": str(e)}
         ok = ok and r["ok"]
@@ -779,11 +888,11 @@ def _ifw_update(dctx, pkg: str, comps: list[str], block: bool) -> dict:
 
 
 def _h_ifw_block(dctx, pkg, user, p):
-    return _ifw_update(dctx, pkg, [_vcomp(p, pkg)], True)
+    return _ifw_update(dctx, pkg, [_vcomp(p, pkg)], True, user)
 
 
 def _h_ifw_unblock(dctx, pkg, user, p):
-    return _ifw_update(dctx, pkg, [_vcomp(p, pkg)], False)
+    return _ifw_update(dctx, pkg, [_vcomp(p, pkg)], False, user)
 
 
 def _tracker_components(dctx, pkg: str) -> list[str]:
@@ -805,14 +914,14 @@ def _h_block_trackers(dctx, pkg, user, p):
     comps = _tracker_components(dctx, pkg)
     if not comps:
         return {"ok": True, "output": "no tracker components in the cached scan"}
-    return _ifw_update(dctx, pkg, comps, True)
+    return _ifw_update(dctx, pkg, comps, True, user)
 
 
 def _h_unblock_trackers(dctx, pkg, user, p):
     comps = _tracker_components(dctx, pkg)
     if not comps:
         return {"ok": True, "output": "no tracker components in the cached scan"}
-    return _ifw_update(dctx, pkg, comps, False)
+    return _ifw_update(dctx, pkg, comps, False, user)
 
 
 def _h_compile(dctx, pkg, user, p):
@@ -856,20 +965,51 @@ def _h_kill(dctx, pkg, user, p):
         return {"ok": False, "output": f"pid {pid} is not running"}
     if row[1] % 100000 != uid % 100000:
         return {"ok": False, "output": f"pid {pid} belongs to uid {row[1]}, not to {pkg}"}
+    # a platform package may share uid 1000 with system_server and the HALs:
+    # the appId match alone would let kill -9 soft-reboot the device
+    if _core_process(row[1], row[3]):
+        return {"ok": False, "output": f"refusing to kill {row[3]} (pid {pid}): core system "
+                                       f"process on uid {row[1]}"}
     return _cmd(dctx, f"kill -9 {pid}", su=True)
+
+
+_PREFS_STOPPED = "app force-stopped first, so its in-memory copy cannot overwrite the edit"
+
+
+def _prefs_stop(dctx, pkg: str, user: int, p: dict, setting: bool) -> None:
+    """Validate the request (so a refused one never stops anything), then stop
+    the app: a running process keeps the whole preference map in memory and
+    writes it back on its next commit, which would silently undo the edit."""
+    import json
+    from . import appdata
+    file, key = p.get("file", ""), p.get("key", "")
+    if not isinstance(file, str) or not appdata.PREF_FILE.match(file) or ".." in file:
+        raise _Refused("invalid prefs file name")
+    if not isinstance(key, str) or not appdata.PREF_KEY.match(key):
+        raise _Refused("invalid key")
+    if setting:
+        value = p.get("value")
+        if p.get("type") not in appdata.PREF_TYPES:
+            raise _Refused("invalid type")
+        limit = getattr(appdata, "_MAX_VALUE", 4000)
+        if len(str(json.dumps(value) if isinstance(value, list) else value)) > limit:
+            raise _Refused("value too long")
+    _cmd(dctx, f"am force-stop --user {int(user)} {shlex.quote(pkg)}")
 
 
 def _h_prefs_set(dctx, pkg, user, p):
     from .appdata import prefs_set
+    _prefs_stop(dctx, pkg, user, p, True)
     out = prefs_set(dctx, pkg, str(p.get("file", "")), str(p.get("key", "")),
-                    str(p.get("type", "")), p.get("value"))
-    return {"ok": True, "output": out}
+                    str(p.get("type", "")), p.get("value"), user=user)
+    return {"ok": True, "output": f"{out} ({_PREFS_STOPPED})"}
 
 
 def _h_prefs_delete(dctx, pkg, user, p):
     from .appdata import prefs_delete
-    return {"ok": True, "output": prefs_delete(dctx, pkg, str(p.get("file", "")),
-                                               str(p.get("key", "")))}
+    _prefs_stop(dctx, pkg, user, p, False)
+    out = prefs_delete(dctx, pkg, str(p.get("file", "")), str(p.get("key", "")), user=user)
+    return {"ok": True, "output": f"{out} ({_PREFS_STOPPED})"}
 
 
 def _h_grant_revoke(action):
@@ -877,7 +1017,7 @@ def _h_grant_revoke(action):
         perm = p.get("permission", "")
         if not isinstance(perm, str) or not _PERM.match(perm):
             raise _Refused("invalid permission")
-        return _cmd(dctx, f"pm {action} {shlex.quote(pkg)} {shlex.quote(perm)}")
+        return _cmd(dctx, f"pm {action} --user {user} {shlex.quote(pkg)} {shlex.quote(perm)}")
     return h
 
 
@@ -885,7 +1025,8 @@ def _h_appop(dctx, pkg, user, p):
     op, mode = p.get("op", ""), p.get("mode", "")
     if not isinstance(op, str) or not _OP.match(op) or mode not in _MODES:
         raise _Refused("invalid op or mode")
-    return _cmd(dctx, f"appops set {shlex.quote(pkg)} {shlex.quote(op)} {shlex.quote(mode)}")
+    return _cmd(dctx, f"appops set --user {user} {shlex.quote(pkg)} {shlex.quote(op)} "
+                      f"{shlex.quote(mode)}")
 
 
 def _h_component_state(verb):
@@ -893,13 +1034,14 @@ def _h_component_state(verb):
         comp = p.get("component", "")
         if not isinstance(comp, str) or not _COMPONENT.match(comp):
             raise _Refused("invalid component")
-        return _cmd(dctx, f"pm {verb} {shlex.quote(comp)}")
+        return _cmd(dctx, f"pm {verb} --user {user} {shlex.quote(comp)}")
     return h
 
 
 def _simple(fmt: str, *, su: bool = False):
+    # only the quoted name ({q}) is offered: nothing raw reaches a shell
     def h(dctx, pkg, user, p):
-        return _cmd(dctx, fmt.format(q=shlex.quote(pkg), user=user, pkg=pkg), su=su)
+        return _cmd(dctx, fmt.format(q=shlex.quote(pkg), user=int(user)), su=su)
     return h
 
 
@@ -908,8 +1050,12 @@ ACTIONS: dict = {
     "disable": _simple("pm disable-user --user {user} {q}"),
     "force-stop": _simple("am force-stop {q}"),
     "clear-data": _simple("pm clear --user {user} {q}"),
-    "clear-cache": _simple("rm -rf /data/data/{pkg}/cache/* /data/data/{pkg}/code_cache/* "
-                           "2>/dev/null; echo cleared", su=True),
+    # per-user data dir (/data/user/0 is /data/data); "cleared" only after the
+    # rm ran as someone who may write there, so a su-less shell cannot report
+    # success for a directory it could not touch
+    "clear-cache": _simple('d=/data/user/{user}/{q}; [ -w "$d" ] && rm -rf "$d"/cache/* '
+                           '"$d"/code_cache/* && echo cleared || echo "Error: cache not cleared '
+                           '(no data dir for user {user}, or no root)"', su=True),
     "uninstall": _h_uninstall,
     # bring back an app that was removed for this user (the usual debloat),
     # using the copy still on the device - no download needed
@@ -929,7 +1075,7 @@ ACTIONS: dict = {
     "freeze": _h_freeze,
     "unfreeze": _h_unfreeze,
     "uninstall-updates": _h_uninstall_updates,
-    "appops-reset": _simple("appops reset {q}"),
+    "appops-reset": _simple("appops reset --user {user} {q}"),
     "appops-deny-dangerous": _h_appops_deny_dangerous,
     "prevent-background": _h_prevent_background,
     "deny-dangerous-perms": _h_deny_dangerous_perms,
@@ -965,7 +1111,9 @@ def _emit_action(dctx, action: str, pkg: str, user: int, p: dict, res: dict) -> 
     for k, v in (p or {}).items():
         if k in ("device", "confirm", "package", "action", "user"):
             continue
-        if isinstance(v, str):
+        if any(s in str(k).lower() for s in _SENSITIVE_PARAMS):
+            v = "<redacted>"
+        elif isinstance(v, str):
             v = v[:200]
         elif v is not None and not isinstance(v, (bool, int, float)):
             v = str(v)[:200]
@@ -1005,6 +1153,10 @@ def run_action(dctx, action: str, params: dict) -> dict:
         res = {"ok": False, "output": str(e)}
     except Exception as e:  # noqa: BLE001 - a surprise must reach the UI, not a 500
         res = {"ok": False, "output": f"{type(e).__name__}: {e}"}
+    # the memoised per-user listings / role holders may now be stale
+    # (uninstall, reinstall, hide, disable...): drop them, they are cheap
+    if isinstance(getattr(dctx, "state", None), dict):
+        dctx.state.pop("_memo", None)
     res.update({"action": action, "package": pkg})
     _emit_action(dctx, action, pkg, user, p, res)
     return res
@@ -1032,6 +1184,8 @@ def batch(dctx, action: str, packages, user=0, confirm: bool = False,
     user = _vuser(user)
     if action in DESTRUCTIVE and not confirm:
         raise _Refused("destructive action requires confirm=true")
+    if options is not None and not isinstance(options, dict):
+        raise _Refused("options must be an object")
     opts = {k: v for k, v in (options or {}).items()
             if k not in ("device", "package", "packages", "user", "confirm", "action")}
     results = []
@@ -1084,25 +1238,53 @@ _ONECLICK_BATCH = {
     "backup-all": ("backup", {}),
     "compile-all": ("compile", {"mode": "speed-profile"}),
 }
-# never touched by a one-click op; the launcher (role HOME) joins at runtime
-PROTECTED = frozenset({"android", "com.android.systemui", "com.android.settings",
-                       "com.android.phone", "com.android.shell"})
+# never touched by a one-click op: the platform packages the device cannot
+# do without (plus the providers, the root manager and, at runtime, the
+# current browser / launcher / sms / dialer holders and the keyboard)
+PROTECTED = frozenset({
+    "android", "com.android.systemui", "com.android.settings", "com.android.phone",
+    "com.android.shell", "com.android.server.telecom", "com.android.telecom",
+    "com.android.bluetooth", "com.android.nfc", "com.android.externalstorage",
+    "com.android.documentsui", "com.google.android.gms", "com.google.android.gsf",
+    "com.android.vending", "io.github.huskydg.magisk", "com.topjohnwu.magisk",
+    "me.weishu.kernelsu", "me.bmax.apatch",
+})
+_PROTECTED_PREFIXES = ("com.android.providers.",)
+_IME_SETTING = "settings get secure default_input_method"
+
+
+def _runtime_protected(dctx) -> set[str]:
+    """Role / default holders (browser, launcher, sms, dialer, assistant) and
+    the current keyboard: role lookups exist on Android 14+ only, so the
+    `pm resolve-activity` defaults are the honest answer below that."""
+    h = _safe(lambda: handlers_cached(dctx, 0), {}) or {}
+    out: set[str] = set()
+    for holders in (h.get("roles") or {}).values():
+        out |= {p for p in holders if isinstance(p, str)}
+    out |= {p for p in (h.get("defaults") or {}).values() if isinstance(p, str)}
+    try:
+        ime = dctx.adb.shell_sync(_IME_SETTING, timeout=10).strip().split("/", 1)[0]
+    except AdbError:
+        ime = ""
+    if _PKG.match(ime):
+        out.add(ime)
+    return out
 
 
 def oneclick_packages(dctx, scope: str) -> list[str]:
-    """user = third-party apps; all = every app uid >= 10000 minus the core
-    system packages and the launcher."""
+    """user = third-party apps; all = every app uid >= 10000; both minus the
+    protected platform packages and the current role holders / keyboard."""
     adb = dctx.adb
     if scope == "user":
         pkgs = _pm_set(adb, "-3")
     else:
         rows, _ = _pm_list(adb, "")
         if any(r.get("uid") for r in rows.values()):
-            pkgs = {p for p, r in rows.items() if (r.get("uid") or 0) >= 10000}
+            pkgs = {p for p, r in rows.items() if (r.get("uid") or 0) >= _FIRST_APP_UID}
         else:                      # this pm has no -U: keep every non-core package
             pkgs = set(rows)
-    launcher = set(_safe(lambda: handlers_cached(dctx, 0)["roles"]["home"], []))
-    return sorted(pkgs - PROTECTED - launcher)
+    pkgs -= PROTECTED | _runtime_protected(dctx)
+    return sorted(p for p in pkgs if not p.startswith(_PROTECTED_PREFIXES))
 
 
 def oneclick(dctx, op: str, confirm: bool = False, scope: str = "user") -> dict:
@@ -1245,7 +1427,8 @@ def controls(dctx, pkg: str, user: int = 0) -> dict:
     probe("data_saver", saver)
 
     def sensors():
-        txt = adb.shell_sync(f"cmd sensorservice get-uid-state {q}", timeout=15).lower()
+        txt = adb.shell_sync(f"cmd sensorservice get-uid-state {q}{_sensor_user(user)}",
+                             timeout=15).lower()
         if "active" in txt:
             return "active"
         if "idle" in txt:
@@ -1295,6 +1478,11 @@ def controls(dctx, pkg: str, user: int = 0) -> dict:
     def keystore():
         if uid is None:
             raise AdbError("uid unknown")
+        # keystore2 (Android 12+) keeps every key in persistent.sqlite, so the
+        # per-uid blobs below are gone or stale there: no honest count
+        sdk = _sdk(dctx)
+        if sdk is not None and sdk >= 31:
+            raise AdbError("not counted on Android 12+: keys live in keystore2's database")
         txt = adb.shell_sync(f"ls /data/misc/keystore/user_{user}", su=True, timeout=15)
         if not _ok(txt):
             raise AdbError(txt.strip()[:80])
@@ -1324,6 +1512,14 @@ def export_rows(apps: list[dict], inv: dict | None = None) -> list[dict]:
     return rows
 
 
+def _cell(v) -> object:
+    """Spreadsheet-safe cell: a label/version/installer chosen by an app that
+    starts like a formula (= + - @, tab, CR) gets the usual leading quote."""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return v
+
+
 def render_export(rows: list[dict], fmt: str) -> tuple[str, str, str]:
     """-> (body, media type, file extension) for csv | json | md."""
     import csv
@@ -1335,7 +1531,7 @@ def render_export(rows: list[dict], fmt: str) -> tuple[str, str, str]:
         lines = ["| " + " | ".join(EXPORT_COLUMNS) + " |",
                  "|" + "|".join(" --- " for _ in EXPORT_COLUMNS) + "|"]
         for r in rows:
-            lines.append("| " + " | ".join(str(r.get(c, "")).replace("|", "\\|")
+            lines.append("| " + " | ".join(str(_cell(r.get(c, ""))).replace("|", "\\|")
                                            for c in EXPORT_COLUMNS) + " |")
         return "\n".join(lines) + "\n", "text/markdown", "md"
     buf = io.StringIO()
@@ -1343,7 +1539,7 @@ def render_export(rows: list[dict], fmt: str) -> tuple[str, str, str]:
                        lineterminator="\n")
     w.writeheader()
     for r in rows:
-        w.writerow(r)
+        w.writerow({k: _cell(v) for k, v in r.items()})
     return buf.getvalue(), "text/csv", "csv"
 
 

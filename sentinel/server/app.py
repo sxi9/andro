@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
 import re
 import shutil
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -184,8 +186,8 @@ def _demo_app_detail(pkg: str) -> dict:
             "disabled_components": [f"{pkg}.AdReceiver"],
             "enabled_components": [],
         },
-        "appops": [{"op": "RECORD_AUDIO", "background": False, "rejected": False, "ago": 42},
-                   {"op": "CAMERA", "background": False, "rejected": False, "ago": 300}],
+        "appops": [{"op": "RECORD_AUDIO", "mode": "allow", "background": False, "rejected": False, "ago": 42},
+                   {"op": "CAMERA", "mode": "allow", "background": False, "rejected": False, "ago": 300}],
         "godmode": [], "sizes": {"data": 48 * 1024 * 1024, "cache": 12 * 1024 * 1024,
                                  "app": 44 * 1024 * 1024},
         "apk_paths": [f"/data/app/~~x/{pkg}-y/base.apk"],
@@ -303,7 +305,7 @@ def _demo_scan(pkg: str) -> dict:
         "libraries": [{"name": "OkHttp", "website": "https://square.github.io/okhttp/", "classes": 240}],
         "native_libs": [{"abi": "arm64-v8a", "files": ["libapp.so", "libsqlcipher.so"]}],
         "dex_files": 3, "classes_scanned": 18_420, "apk_size": 36 * 1024 * 1024,
-        "scanned_at": "2026-10-15 10:00:00", "cached": True,
+        "scanned_at": "2026-10-15T10:00:00+00:00", "scanned_ts": 1760522400.0, "cached": True,
     }
 
 
@@ -564,12 +566,17 @@ def create_app(cfg: Config) -> FastAPI:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(_local_hosts))
 
     def _origin_ok(origin: str | None) -> bool:
+        # The Origin must be this server itself (scheme, host and port): a page
+        # on another local port (a dev server, another tool) is cross-origin to
+        # the browser, and a multipart form POST from it needs no preflight.
         if not origin:
             return True
         try:
-            return (urlparse(origin).hostname or "") in _local_hosts
+            u = urlparse(origin)
+            port = u.port if u.port is not None else {"http": 80, "https": 443}.get(u.scheme)
         except ValueError:
             return False
+        return u.scheme == "http" and (u.hostname or "") in _local_hosts and port == cfg.port
 
     @app.middleware("http")
     async def _csrf_guard(request, call_next):
@@ -583,8 +590,29 @@ def create_app(cfg: Config) -> FastAPI:
                                     status_code=403)
         return await call_next(request)
 
-    def _dev(serial: str | None):
-        return hub.resolve(serial)
+    @app.middleware("http")
+    async def _upload_cap(request, call_next):
+        # FastAPI parses the multipart form before am_install runs, and
+        # Starlette spools every file part to the temp dir with no size limit,
+        # so the 400 MB cap has to be applied here on Content-Length before a
+        # byte of the body is read; the handler's streamed check stays as the
+        # backstop (chunked bodies carry no length). 1 MiB covers the form
+        # boundaries and the options field.
+        if request.method == "POST" and request.url.path == "/api/appmanager/install":
+            try:
+                length = int(request.headers.get("content-length") or 0)
+            except ValueError:
+                length = 0
+            if length > MAX_UPLOAD + 1024 * 1024:
+                return JSONResponse({"ok": False, "output": "file exceeds 400 MB"},
+                                    status_code=413)
+        return await call_next(request)
+
+    def _dev(serial: object):
+        # `device` comes straight out of the JSON body: a list/dict would blow
+        # up the `in` test in Hub.resolve, so anything but a string means
+        # "the default device"
+        return hub.resolve(serial if isinstance(serial, str) else None)
 
     # ---------- devices & ADB control ----------
     @app.get("/api/devices")
@@ -993,26 +1021,30 @@ def create_app(cfg: Config) -> FastAPI:
         return await _get(scan_app, dctx, pkg, bool(refresh))
 
     @app.get("/api/appmanager/app/{pkg}/prefs")
-    async def am_prefs(pkg: str, device: str | None = None):
+    async def am_prefs(pkg: str, device: str | None = None, user: int = 0):
         if not PKG_RE.match(pkg):
             return _bad("invalid package name")
+        if not 0 <= user <= 999:
+            return _bad("invalid user")
         dctx = _dev(device)
         if dctx is None or dctx.adb is None:
             return _demo_prefs(pkg)
         from ..service import appdata
-        return await _get(appdata.prefs_list, dctx, pkg)
+        return await _get(appdata.prefs_list, dctx, pkg, user)
 
     @app.get("/api/appmanager/app/{pkg}/prefs/{file}")
-    async def am_prefs_file(pkg: str, file: str, device: str | None = None):
+    async def am_prefs_file(pkg: str, file: str, device: str | None = None, user: int = 0):
         if not PKG_RE.match(pkg):
             return _bad("invalid package name")
         if not PREF_FILE.match(file) or ".." in file:
             return _bad("invalid prefs file name")
+        if not 0 <= user <= 999:
+            return _bad("invalid user")
         dctx = _dev(device)
         if dctx is None or dctx.adb is None:
             return _demo_prefs_file(file)
         from ..service import appdata
-        return await _get(appdata.prefs_read, dctx, pkg, file)
+        return await _get(appdata.prefs_read, dctx, pkg, file, user)
 
     @app.get("/api/appmanager/app/{pkg}/db")
     async def am_db(pkg: str, device: str | None = None):
@@ -1104,17 +1136,30 @@ def create_app(cfg: Config) -> FastAPI:
         dctx = _dev(device)
         return {"ops": ONECLICK_OPS, "demo": dctx is None or dctx.adb is None}
 
+    async def _bulk(dctx, fn, *args):
+        # One bulk pass per device at a time: a second click on the same
+        # one-click op, or a batch while one runs, must not interleave
+        # pm/appops commands over the same packages (cf. labels_task). The
+        # check-and-acquire happens on the event loop, so it cannot race.
+        lock = dctx.state.setdefault("bulk_lock", threading.Lock())
+        if not lock.acquire(blocking=False):
+            return JSONResponse({"ok": False, "output": "a batch is already running on this device"},
+                                status_code=409)
+        try:
+            return await asyncio.to_thread(fn, dctx, *args)
+        except AdbError as e:
+            return _refuse(str(e))
+        finally:
+            lock.release()
+
     @app.post("/api/appmanager/oneclick")
     async def am_oneclick(body: dict):
         dctx = _dev(body.get("device"))
         if dctx is None or dctx.adb is None:
             return _demo_refuse()
         from ..service import appmanager
-        try:
-            return await asyncio.to_thread(appmanager.oneclick, dctx, str(body.get("op", "")),
-                                           bool(body.get("confirm")), str(body.get("scope", "user")))
-        except AdbError as e:
-            return _refuse(str(e))
+        return await _bulk(dctx, appmanager.oneclick, str(body.get("op", "")),
+                           bool(body.get("confirm")), str(body.get("scope", "user")))
 
     @app.post("/api/appmanager/batch")
     async def am_batch(body: dict):
@@ -1122,12 +1167,9 @@ def create_app(cfg: Config) -> FastAPI:
         if dctx is None or dctx.adb is None:
             return _demo_refuse()
         from ..service import appmanager
-        try:
-            return await asyncio.to_thread(appmanager.batch, dctx, str(body.get("action", "")),
-                                           body.get("packages"), body.get("user", 0),
-                                           bool(body.get("confirm")), body.get("options") or {})
-        except AdbError as e:
-            return _refuse(str(e))
+        return await _bulk(dctx, appmanager.batch, str(body.get("action", "")),
+                           body.get("packages"), body.get("user", 0),
+                           bool(body.get("confirm")), body.get("options") or {})
 
     if _HAS_MULTIPART:
         @app.post("/api/appmanager/install")
@@ -1156,10 +1198,10 @@ def create_app(cfg: Config) -> FastAPI:
             if not safe.lower().endswith(ext):
                 safe += ext
             updir = cfg.data_dir / "uploads" / uuid.uuid4().hex
-            updir.mkdir(parents=True, exist_ok=True)
             dest = updir / safe
             size = 0
             try:
+                updir.mkdir(parents=True, exist_ok=True)
                 with open(dest, "wb") as fh:
                     while True:
                         chunk = await file.read(1024 * 1024)
@@ -1172,6 +1214,12 @@ def create_app(cfg: Config) -> FastAPI:
             except ValueError as e:
                 shutil.rmtree(updir, ignore_errors=True)
                 return _refuse(str(e))
+            except OSError as e:
+                # disk full / unwritable data_dir: say why instead of a bare
+                # 500, and do not leave the partial upload behind
+                shutil.rmtree(updir, ignore_errors=True)
+                return JSONResponse({"ok": False, "output": f"cannot save upload: {e.strerror or e}"},
+                                    status_code=507 if e.errno == errno.ENOSPC else 400)
             finally:
                 await file.close()
             if size == 0:

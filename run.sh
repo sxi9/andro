@@ -7,6 +7,8 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="$DIR/.venv/bin/python"
+# install.sh puts the venv under ~/.local/share when the checkout path has a ':'
+[ -x "$PY" ] || PY="$HOME/.local/share/android-sentinel/.venv/bin/python"
 [ -x "$PY" ] || PY="${XDG_DATA_HOME:-$HOME/.local/share}/android-sentinel/.venv/bin/python"
 if [ ! -x "$PY" ]; then
   echo "No virtualenv found. Run the installer first: $DIR/install.sh" >&2

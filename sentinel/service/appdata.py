@@ -3,9 +3,10 @@
 Storage layout and sizes, shared_prefs XML files, sqlite databases (copied to
 this host and opened read-only - never queried on the device) and the process
 list. Writes exist only for a single preference key and go through a pushed
-temp file + `cp` as root, then chown/chmod/restorecon so the app still owns
-its file. Every path component that reaches a shell is validated against a
-strict pattern and shell-quoted.
+temp file + `cp` as root into a staged name next to the target, chown/chmod/
+restorecon on that stage, then a rename into place (an app-planted symlink is
+never followed). Every path component that reaches a shell is validated
+against a strict pattern and shell-quoted.
 """
 from __future__ import annotations
 
@@ -49,6 +50,16 @@ def _vfile(name: str, pattern: re.Pattern, what: str) -> str:
     return name
 
 
+def _vuser(user) -> int:
+    try:
+        u = int(user)
+    except (TypeError, ValueError):
+        raise AdbError("invalid user id") from None
+    if not 0 <= u <= 999:
+        raise AdbError("invalid user id")
+    return u
+
+
 def package_uid(dctx, pkg: str, user: int = 0) -> int | None:
     """The app's uid for one user: `pm list packages -U` (exact match), then
     the cached uid map, then the package dump kept by the collectors."""
@@ -78,9 +89,10 @@ def write_device_file(dctx, remote: str, data: bytes, *, mode: str = "644",
                       owner: str | None = None, restorecon: bool = True,
                       mkdir: bool = False) -> str:
     """Write bytes to a root-owned path: push to /data/local/tmp (the only
-    place adb may write), then `cp` into place as root and fix mode/owner/
-    SELinux label. mkdir creates the parent (root-owned, so only for system
-    dirs). Returns the shell output; raises AdbError on failure."""
+    place adb may write), `cp` to a staged name beside the target as root, fix
+    its mode/owner/SELinux label, then rename it over the target. mkdir creates
+    the parent (root-owned, so only for system dirs). Returns the shell output;
+    raises AdbError on failure."""
     if not remote.startswith("/") or ".." in remote or not re.fullmatch(r"[A-Za-z0-9_./\-]+", remote):
         raise AdbError("invalid remote path")
     if owner is not None and not re.fullmatch(r"\d{1,7}:\d{1,7}", owner):
@@ -100,18 +112,29 @@ def write_device_file(dctx, remote: str, data: bytes, *, mode: str = "644",
             os.unlink(local)
         except OSError:
             pass
-    q_t, q_r = shlex.quote(tmp_remote), shlex.quote(remote)
-    steps = [f"cp {q_t} {q_r}", f"chmod {mode} {q_r}"]
+    parent = posixpath.dirname(remote)
+    # cp and a plain chown both follow a symlink at the target, so the file is
+    # staged under a random name next to it and renamed into place: rename(2)
+    # replaces a link instead of writing through it
+    stage = f"{parent}/.sentinel-{uuid.uuid4().hex}.tmp"
+    q_t, q_r, q_p, q_s = (shlex.quote(tmp_remote), shlex.quote(remote),
+                          shlex.quote(parent), shlex.quote(stage))
     if mkdir:
-        steps.insert(0, f"mkdir -p {shlex.quote(posixpath.dirname(remote))}")
+        steps = [f"mkdir -p {q_p}"]
+    else:
+        # the parent may be a dir the app owns (shared_prefs): it must be a real one
+        steps = [f"test -d {q_p} && test ! -L {q_p}"]
+    steps += [f"cp {q_t} {q_s}", f"chmod {mode} {q_s}"]
     if owner:
-        steps.append(f"chown {owner} {q_r}")
+        steps.append(f"chown {owner} {q_s}")
     if restorecon:
-        steps.append(f"restorecon {q_r}")
-    cmd = "(" + " && ".join(steps) + " && echo WROTE); rm -f " + q_t
+        steps.append(f"restorecon {q_s}")
+    # the target: absent or a regular file, never a link, directory or device
+    steps += [f"test ! -L {q_r} && ( test ! -e {q_r} || test -f {q_r} )", f"mv -f {q_s} {q_r}"]
+    cmd = "(" + " && ".join(steps) + f" && echo WROTE); rm -f {q_t} {q_s}"
     out = adb.shell_sync(cmd, su=True, timeout=30)
     if "WROTE" not in out:
-        raise AdbError(f"write failed: {out.strip()[:200] or 'permission denied (root?)'}")
+        raise AdbError(f"write failed: {out.strip()[:200] or 'target is not a regular file in a real directory, or permission denied (root?)'}")
     return out
 
 
@@ -189,8 +212,12 @@ def storage(dctx, pkg: str) -> dict:
 
 # ---------------- shared_prefs ----------------
 
-def _prefs_dir(pkg: str) -> str:
-    return f"/data/data/{_vpkg(pkg)}/shared_prefs"
+def _prefs_dir(pkg: str, user: int = 0) -> str:
+    # /data/data is user 0's CE dir (/data/user/0 links to it); a work profile
+    # or secondary user keeps its own copy under /data/user/<N>
+    u = _vuser(user)
+    base = f"/data/data/{_vpkg(pkg)}" if u == 0 else f"/data/user/{u}/{_vpkg(pkg)}"
+    return f"{base}/shared_prefs"
 
 
 def _parse_prefs(raw: bytes) -> list[dict]:
@@ -227,8 +254,8 @@ def _parse_prefs(raw: bytes) -> list[dict]:
     return out
 
 
-def prefs_list(dctx, pkg: str) -> dict:
-    d = _prefs_dir(pkg)
+def prefs_list(dctx, pkg: str, user: int = 0) -> dict:
+    d = _prefs_dir(pkg, user)
     try:
         entries = parse_ls_la(dctx.adb.list_dir(d))
     except AdbError as e:
@@ -247,9 +274,9 @@ def prefs_list(dctx, pkg: str) -> dict:
     return {"files": files}
 
 
-def prefs_read(dctx, pkg: str, file: str) -> dict:
+def prefs_read(dctx, pkg: str, file: str, user: int = 0) -> dict:
     _vfile(file, PREF_FILE, "prefs file")
-    raw = _cat(dctx, f"{_prefs_dir(pkg)}/{file}")
+    raw = _cat(dctx, f"{_prefs_dir(pkg, user)}/{file}")
     if not raw.strip():
         raise AdbError("file is empty or unreadable (root?)")
     return {"file": file, "entries": _parse_prefs(raw)}
@@ -293,8 +320,12 @@ def _render_prefs(root: ET.Element) -> bytes:
     return ("<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n" + body + "\n").encode()
 
 
-def _rewrite_prefs(dctx, pkg: str, file: str, mutate) -> str:
-    path = f"{_prefs_dir(pkg)}/{file}"
+_PROBE_MARK = re.compile(r"\b(ABSENT|EMPTY)\b")
+
+
+def _rewrite_prefs(dctx, pkg: str, file: str, mutate, user: int = 0) -> str:
+    user = _vuser(user)
+    path = f"{_prefs_dir(pkg, user)}/{file}"
     raw = _cat(dctx, path)
     if raw.strip():
         try:
@@ -302,16 +333,26 @@ def _rewrite_prefs(dctx, pkg: str, file: str, mutate) -> str:
         except ET.ParseError as e:
             raise AdbError(f"not a shared_prefs XML file: {e}") from None
     else:
+        # exec-out hides cat's exit status, so no output is ambiguous: only a
+        # file confirmed absent (or truly empty) starts as a fresh <map>; a
+        # failed read must never replace the app's real preferences
+        q = shlex.quote(path)
+        probe = dctx.adb.shell_sync(
+            f"if test -e {q}; then test -s {q} && echo NONEMPTY || echo EMPTY; else echo ABSENT; fi",
+            su=True, timeout=20)
+        if not _PROBE_MARK.search(probe):
+            raise AdbError("could not read the prefs file (root?); it was left untouched")
         root = ET.Element("map")
     mutate(root)
-    uid = package_uid(dctx, pkg)
+    uid = package_uid(dctx, pkg, user)
     if uid is None:
-        raise AdbError("could not resolve the app's uid (is it installed?)")
+        raise AdbError("could not resolve the app's uid (is it installed for this user?)")
+    uid = uid % 100000 + user * 100000    # this user's instance, whichever lookup answered
     write_device_file(dctx, path, _render_prefs(root), mode="660", owner=f"{uid}:{uid}")
     return "set"
 
 
-def prefs_set(dctx, pkg: str, file: str, key: str, ptype: str, value) -> str:
+def prefs_set(dctx, pkg: str, file: str, key: str, ptype: str, value, user: int = 0) -> str:
     _vfile(file, PREF_FILE, "prefs file")
     if not PREF_KEY.match(key or ""):
         raise AdbError("invalid key")
@@ -333,10 +374,10 @@ def prefs_set(dctx, pkg: str, file: str, key: str, ptype: str, value) -> str:
                 ET.SubElement(el, "string").text = item
         else:
             el.set("value", rendered)
-    return _rewrite_prefs(dctx, pkg, file, mutate)
+    return _rewrite_prefs(dctx, pkg, file, mutate, user)
 
 
-def prefs_delete(dctx, pkg: str, file: str, key: str) -> str:
+def prefs_delete(dctx, pkg: str, file: str, key: str, user: int = 0) -> str:
     _vfile(file, PREF_FILE, "prefs file")
     if not PREF_KEY.match(key or ""):
         raise AdbError("invalid key")
@@ -350,7 +391,7 @@ def prefs_delete(dctx, pkg: str, file: str, key: str) -> str:
                 found = True
         if not found:
             raise AdbError("key not found")
-    _rewrite_prefs(dctx, pkg, file, mutate)
+    _rewrite_prefs(dctx, pkg, file, mutate, user)
     return "deleted"
 
 

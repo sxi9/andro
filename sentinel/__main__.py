@@ -8,19 +8,22 @@ import sys
 _REQUIRED = {           # import name -> pip name (requirements.txt)
     "fastapi": "fastapi",
     "uvicorn": "uvicorn[standard]",
-    "multipart": "python-multipart",
-    "pyaxmlparser": "pyaxmlparser",
+}
+_OPTIONAL = {           # import name -> (pip name, dashboard feature it enables)
+    "multipart": ("python-multipart", "Install APK"),
+    "pyaxmlparser": ("pyaxmlparser", "Resolve names"),
 }
 
 
-def _missing_deps() -> list[str]:
+def _missing_deps(mods: dict) -> list[str]:
+    """Import names from `mods` that are not installed."""
     import importlib.util
     out = []
-    for mod, pip_name in _REQUIRED.items():
+    for mod in mods:
         if importlib.util.find_spec(mod) is None:
             if mod == "multipart" and importlib.util.find_spec("python_multipart") is not None:
                 continue   # newer releases also ship under this name
-            out.append(pip_name)
+            out.append(mod)
     return out
 
 
@@ -33,14 +36,21 @@ def main(argv: list[str] | None = None) -> int:
     from .config import parse_args
     cfg = parse_args(argv)
 
-    missing = _missing_deps()
+    # a `git pull` can add requirements; say exactly what to run with the
+    # same interpreter that is running us (pip is rarely on PATH on Windows)
+    how = f"  \"{sys.executable}\" -m pip install -r requirements.txt\n(or run install.ps1 / install.sh again)"
+    missing = _missing_deps(_REQUIRED)
     if missing:
-        # a `git pull` can add requirements; say exactly what to run with the
-        # same interpreter that is running us (pip is rarely on PATH on Windows)
-        print(f"Missing Python packages: {', '.join(missing)}\n"
-              f"Install them with:\n  \"{sys.executable}\" -m pip install -r requirements.txt\n"
-              f"(or run install.ps1 / install.sh again)", file=sys.stderr)
+        print(f"Missing Python packages: {', '.join(_REQUIRED[m] for m in missing)}\n"
+              f"Install them with:\n{how}", file=sys.stderr)
         return 2
+    optional = _missing_deps(_OPTIONAL)
+    if optional:
+        # the dashboard degrades on its own (the Install button / Resolve
+        # names say what to install); warn up front but start anyway
+        off = ", ".join(f"{_OPTIONAL[m][0]} ({_OPTIONAL[m][1]} is off)" for m in optional)
+        print(f"Optional Python packages missing: {off}\n"
+              f"Install them with:\n{how}", file=sys.stderr)
 
     if not cfg.demo:
         from .adb.client import AdbClient

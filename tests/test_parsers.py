@@ -591,3 +591,66 @@ def test_uid_map_maps_every_user_uid():
     assert m._uid2pkg[10146] == "com.android.chrome"
     assert m._uid2pkg[1010146] == "com.android.chrome"
     assert m._uid2pkg[10201] == "com.a"
+
+
+# `dumpsys package <pkg>` for a sharedUserId app: the "Shared users:" section
+# that follows "Packages:" repeats "User N: " (no key=value pairs) and the
+# uid's permission lists, which must not overwrite the per-package state
+PKG_DUMP_SHARED_USER = """\
+Packages:
+  Package [com.google.android.gms] (1a2b3c):
+    appId=10104
+    sharedUser=SharedUserSetting{4d5e6f com.google.uid.shared/10104}
+    versionCode=244 minSdk=28 targetSdk=34
+    versionName=24.4
+    flags=[ SYSTEM HAS_CODE ALLOW_CLEAR_USER_DATA ]
+    dataDir=/data/user/0/com.google.android.gms
+    requested permissions:
+      android.permission.CAMERA
+    User 0: ceDataInode=123 installed=true hidden=true suspended=false stopped=false enabled=1
+      gids=[3003]
+      runtime permissions:
+        android.permission.CAMERA: granted=true, flags=[ USER_SET ]
+    User 10: ceDataInode=0 installed=false hidden=false suspended=false stopped=true enabled=0
+
+Queries:
+  system apps queryable: false
+
+Shared users:
+  SharedUser [com.google.uid.shared] (4d5e6f):
+    appId=10104
+    Packages
+      com.google.android.gms
+    install permissions:
+      android.permission.INTERNET: granted=true
+    User 0: 
+      gids=[3003]
+      runtime permissions:
+        android.permission.READ_SMS: granted=true, flags=[ USER_SET ]
+    User 10: 
+      gids=[3003]
+
+Dexopt state:
+  [com.google.android.gms]
+    path: /data/app/x/base.apk
+"""
+
+
+def test_packages_dump_shared_users_section_does_not_clobber_state():
+    d = parse_packages_dump(PKG_DUMP_SHARED_USER)
+    assert list(d) == ["com.google.android.gms"]
+    g = d["com.google.android.gms"]
+    assert g["users"] == {
+        0: {"installed": True, "hidden": True, "suspended": False, "stopped": False,
+            "enabled_state": 1},
+        10: {"installed": False, "hidden": False, "suspended": False, "stopped": True,
+             "enabled_state": 0},
+    }
+    assert g["uid"] == 10104 and g["shared_user"] == "com.google.uid.shared" and g["system"]
+    assert g["granted"] == ["android.permission.CAMERA"]       # not the shared uid's lists
+    assert g["requested"] == ["android.permission.CAMERA"]
+    assert "android.permission.READ_SMS" not in g["perm_flags"]
+    # a second Packages block after a header still parses
+    two = parse_packages_dump(PKG_DUMP_SHARED_USER + "Hidden system packages:\n" + PKG_DUMP_COMP)
+    assert two["com.led.qrflash"]["users"][0]["enabled_state"] == 2
+    assert two["com.google.android.gms"]["users"][0]["installed"] is True

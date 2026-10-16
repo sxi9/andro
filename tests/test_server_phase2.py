@@ -2,17 +2,29 @@
 every POST action is refused in demo mode, uploads and CSRF behave."""
 from __future__ import annotations
 
+import errno
 import io
 import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import types
 import zipfile
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from sentinel.config import Config
+from sentinel.server import app as app_mod
 from sentinel.server.app import create_app
+from sentinel.service.installer import MAX_UPLOAD
 
 PKG = "com.whatsapp"
+REPO = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(scope="module")
@@ -86,6 +98,9 @@ def test_manifest_and_scan(client):
               "apk_size", "scanned_at", "cached"):
         assert k in s, k
     assert len(s["trackers"]) == 2
+    # same shape the real scanner emits, so the UI renders both alike
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00", s["scanned_at"])  # same shape as the real scan
+    assert s["scanned_ts"] > 0
     assert set(s["trackers"][0]) == {"name", "category", "website", "signatures_matched", "classes", "components"}
     assert set(s["libraries"][0]) == {"name", "website", "classes"}
 
@@ -186,9 +201,185 @@ def test_csrf_guard_blocks_cross_origin_posts(client):
     r = client.post("/api/appmanager/action", json={"action": "launch", "package": PKG},
                     headers={"Origin": "http://evil.example"})
     assert r.status_code == 403 and r.json() == {"error": "cross-origin request blocked"}
-    r = client.post("/api/root/request", json={}, headers={"Origin": "http://127.0.0.1:8765"})
-    assert r.status_code == 400                             # same-origin passes to the demo refusal
+    for origin in ("http://127.0.0.1:8765", "http://localhost:8765", "http://[::1]:8765"):
+        r = client.post("/api/root/request", json={}, headers={"Origin": origin})
+        assert r.status_code == 400, origin                 # same-origin passes to the demo refusal
     assert client.get("/api/root", headers={"Origin": "http://evil.example"}).status_code == 200
+
+
+@pytest.mark.parametrize("origin", [
+    "http://localhost:3000",        # another local port: a dev server's page is cross-origin
+    "http://127.0.0.1",             # port 80, not ours
+    "https://127.0.0.1:8765",       # scheme differs
+    "http://localhost.evil.example:8765",
+    "http://127.0.0.1:x",
+    "null",
+])
+def test_csrf_guard_is_port_and_scheme_aware(client, origin):
+    # a multipart form POST needs no preflight, so the guard must compare the
+    # whole origin against the server's own bind, not just the hostname
+    r = client.post("/api/appmanager/install",
+                    files={"file": ("x.apk", b"PK", "application/octet-stream")},
+                    data={"options": "{}"}, headers={"Origin": origin})
+    assert r.status_code == 403 and r.json() == {"error": "cross-origin request blocked"}
+
+
+@pytest.mark.parametrize("url,body", [
+    ("/api/appmanager/action", {"action": "launch", "package": PKG}),
+    ("/api/appmanager/batch", {"action": "force-stop", "packages": [PKG]}),
+    ("/api/appmanager/oneclick", {"op": "trim-caches"}),
+    ("/api/restore", {"name": "x", "confirm": True}),
+    ("/api/root/request", {}),
+    ("/api/root/use", {"enabled": True}),
+    ("/api/adb/root", {}),
+    ("/api/adb/unroot", {}),
+    ("/api/appmanager/resolve-labels", {}),
+])
+@pytest.mark.parametrize("device", [["x"], {"a": 1}, 5, None])
+def test_non_string_device_falls_back_to_default(client, url, body, device):
+    # a list/dict `device` used to reach Hub.resolve's `in` test -> TypeError -> 500
+    r = client.post(url, json={**body, "device": device})
+    assert r.status_code == 400 and r.json()["ok"] is False
+    assert "needs a real device" in r.text
+
+
+def test_install_non_string_device_falls_back(client):
+    r = client.post("/api/appmanager/install",
+                    files={"file": ("x.apk", b"PK", "application/octet-stream")},
+                    data={"options": json.dumps({"device": ["x"]})})
+    assert r.status_code == 400
+    assert r.json() == {"ok": False, "output": "needs a real device (not demo mode)"}
+
+
+def test_install_rejects_oversized_content_length_before_parsing(client):
+    # the multipart parser spools the whole body to the temp dir before the
+    # handler can count bytes, so an oversized Content-Length is refused up front
+    kw = dict(files={"file": ("x.apk", b"PK", "application/octet-stream")}, data={"options": "{}"})
+    r = client.post("/api/appmanager/install", headers={"Content-Length": str(MAX_UPLOAD + 2 * 1024 * 1024)}, **kw)
+    assert r.status_code == 413 and r.json() == {"ok": False, "output": "file exceeds 400 MB"}
+    # just within the allowance for form overhead: passes through to the handler
+    r = client.post("/api/appmanager/install", headers={"Content-Length": str(MAX_UPLOAD + 1024 * 1024)}, **kw)
+    assert r.status_code == 400 and r.json() == {"ok": False, "output": "needs a real device (not demo mode)"}
+    # other routes are not subject to the cap
+    r = client.post("/api/root/request", json={}, headers={"Content-Length": str(MAX_UPLOAD * 2)})
+    assert r.status_code == 400 and "needs a real device" in r.text
+
+
+def _fake_dctx():
+    # looks like a real device to the routes: adb set, state dict for locks
+    return types.SimpleNamespace(adb=object(), state={}, serial="FAKE123")
+
+
+def test_install_write_failure_is_reported_and_cleaned(client, monkeypatch, tmp_path):
+    hub = client.app.state.hub
+    dctx = _fake_dctx()
+    monkeypatch.setattr(hub, "resolve", lambda serial: dctx)
+    uploads = hub.cfg.data_dir / "uploads"
+    kw = dict(files={"file": ("a.apk", b"PK\x03\x04", "application/octet-stream")}, data={"options": "{}"})
+
+    def full(*a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    # the handler's `open` resolves through the module globals first
+    monkeypatch.setattr(app_mod, "open", full, raising=False)
+    r = client.post("/api/appmanager/install", **kw)
+    assert r.status_code == 507
+    assert r.json() == {"ok": False, "output": "cannot save upload: No space left on device"}
+    assert not uploads.exists() or list(uploads.iterdir()) == []   # no orphaned uploads/<uuid>
+
+    # unwritable data_dir: mkdir fails (uploads is a file) before open, still a clean 4xx
+    shutil.rmtree(uploads, ignore_errors=True)
+    uploads.write_bytes(b"")
+    try:
+        r = client.post("/api/appmanager/install", **kw)
+        assert r.status_code == 400 and r.json()["ok"] is False
+        assert r.json()["output"].startswith("cannot save upload: ")
+    finally:
+        uploads.unlink()
+
+
+def test_bulk_lock_refuses_concurrent_batch(client, monkeypatch):
+    from sentinel.service import appmanager
+    hub = client.app.state.hub
+    dctx = _fake_dctx()
+    monkeypatch.setattr(hub, "resolve", lambda serial: dctx)
+    started, release = threading.Event(), threading.Event()
+    calls: list[tuple] = []
+
+    def slow_batch(d, action, pkgs, user, confirm, options):
+        calls.append((action, tuple(pkgs)))
+        started.set()
+        release.wait(5)
+        return {"ok": True, "action": action, "results": []}
+    monkeypatch.setattr(appmanager, "batch", slow_batch)
+    monkeypatch.setattr(appmanager, "oneclick", lambda d, op, confirm, scope: {"ok": True, "op": op})
+
+    body = {"action": "force-stop", "packages": [PKG], "confirm": True}
+    busy = {"ok": False, "output": "a batch is already running on this device"}
+    first: dict = {}
+    t = threading.Thread(target=lambda: first.setdefault("r", client.post("/api/appmanager/batch", json=body)))
+    t.start()
+    assert started.wait(5)
+    try:
+        # while the first pass runs on its thread, a second batch and a one-click op are refused
+        r = client.post("/api/appmanager/batch", json=body)
+        assert r.status_code == 409 and r.json() == busy
+        r = client.post("/api/appmanager/oneclick", json={"op": "compile-all", "confirm": True})
+        assert r.status_code == 409 and r.json() == busy
+    finally:
+        release.set()
+        t.join(5)
+    assert first["r"].status_code == 200 and first["r"].json()["ok"] is True
+    assert calls == [("force-stop", (PKG,))]
+    # the lock is released when the pass ends, so the next one runs
+    assert not dctx.state["bulk_lock"].locked()
+    r = client.post("/api/appmanager/oneclick", json={"op": "compile-all", "confirm": True})
+    assert r.status_code == 200 and r.json() == {"ok": True, "op": "compile-all"}
+    assert not dctx.state["bulk_lock"].locked()
+
+
+def test_main_starts_without_optional_packages(monkeypatch, capsys, tmp_path):
+    import uvicorn
+    import sentinel.__main__ as m
+    for mod in ("pyaxmlparser", "multipart", "python_multipart"):
+        monkeypatch.setitem(sys.modules, mod, None)      # find_spec() -> None, like an uninstalled package
+    assert m._missing_deps(m._REQUIRED) == []
+    assert m._missing_deps(m._OPTIONAL) == ["multipart", "pyaxmlparser"]
+    runs: list = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: runs.append(k))
+    monkeypatch.setattr(app_mod, "create_app", lambda cfg: "app")
+    assert m.main(["--demo", "--data-dir", str(tmp_path)]) == 0
+    assert runs and runs[0]["port"] == 8765
+    err = capsys.readouterr().err
+    assert "Optional Python packages missing" in err
+    assert "python-multipart (Install APK is off)" in err
+    assert "pyaxmlparser (Resolve names is off)" in err
+    # a hard requirement still stops the start
+    monkeypatch.setitem(sys.modules, "fastapi", None)
+    assert m.main(["--demo", "--data-dir", str(tmp_path)]) == 2
+    assert "Missing Python packages: fastapi" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not shutil.which("bash") or os.name == "nt", reason="needs bash")
+@pytest.mark.parametrize("where", ["home", "xdg"])
+def test_run_sh_finds_the_installers_venv(tmp_path, where):
+    # install.sh creates ~/.local/share/android-sentinel/.venv when the checkout
+    # path has a ':'; run.sh must look there whatever XDG_DATA_HOME says
+    chk = tmp_path / "chk"
+    chk.mkdir()
+    shutil.copy(REPO / "run.sh", chk / "run.sh")
+    (chk / "requirements.txt").write_text("fastapi\n")
+    home, xdg = tmp_path / "home", tmp_path / "custom-xdg"
+    venv_bin = (home / ".local/share" if where == "home" else xdg) / "android-sentinel/.venv/bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.write_text("#!/bin/sh\necho \"fake-python $*\"\n")
+    py.chmod(0o755)
+    (venv_bin / "python.reqs-stamp").touch()               # stamp newer than requirements -> no pip step
+    env = {**os.environ, "HOME": str(home), "XDG_DATA_HOME": str(xdg)}
+    r = subprocess.run(["bash", str(chk / "run.sh"), "--demo"], env=env,
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "fake-python -m sentinel --demo"
 
 
 def test_backup_jobs_route_lists_type(client):

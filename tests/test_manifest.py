@@ -2,8 +2,13 @@
 signature tables and the prefix matcher."""
 from __future__ import annotations
 
+import datetime
+import io
 import json
+import re
 import struct
+import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -17,6 +22,7 @@ SAMPLE_APK = Path("/tmp/claude-0/-home-user-andro/9f21e297-6624-5b9e-afc1-ff4f09
                   "scratchpad/apk-test/fdroid-sample.apk")
 PKG = "org.fdroid.fdroid"
 APK_PATH = "/data/app/~~abc==/org.fdroid.fdroid-xyz==/base.apk"
+_ISO_UTC = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00")
 
 needs_apk = pytest.mark.skipif(not SAMPLE_APK.exists(), reason="sample APK not downloaded")
 
@@ -70,6 +76,23 @@ def test_tracker_for_class_prefers_longest_prefix():
     assert tracker_for_class("") is None
 
 
+def test_protection_level_flags_match_aosp():
+    pl = manifest._protection_level
+    assert pl("0x00000012") == "signature|privileged"
+    # PermissionInfo.PROTECTION_FLAG_* tail bits (module..knownSigner)
+    assert pl("0x00400002") == "signature|module"
+    assert pl("0x00800002") == "signature|companion"
+    assert pl("0x01000002") == "signature|retailDemo"
+    assert pl("0x02000002") == "signature|recents"
+    assert pl("0x04000012") == "signature|privileged|role"
+    assert pl("0x08000002") == "signature|knownSigner"
+    assert pl("0x00000081") == "dangerous|pre23" and pl("3") == "signatureOrSystem"
+    assert pl(None) is None and pl("dangerous") == "dangerous"
+    bits = [b for b, _ in manifest._PROT_FLAGS]
+    assert bits == sorted(bits) and all(b & (b - 1) == 0 for b in bits)
+    assert len({n for _, n in manifest._PROT_FLAGS}) == len(bits)
+
+
 def test_is_dangerous():
     assert is_dangerous("android.permission.CAMERA")
     assert is_dangerous("com.android.voicemail.permission.ADD_VOICEMAIL")
@@ -101,8 +124,19 @@ def test_dex_class_names_synthetic():
     assert dex_class_names(dex) == ["com.appsflyer.AppsFlyerLib", "org.example.Main$1"]
     with pytest.raises(ValueError):
         dex_class_names(b"PK\x03\x04" + b"\0" * 200)
-    # a truncated table does not blow up
-    assert dex_class_names(dex[:0x7c]) == []
+    # a table outside the file (short read, bogus header) is an error, not 0 classes
+    with pytest.raises(ValueError, match="tables outside file"):
+        dex_class_names(dex[:0x7c])
+    for off in (0x3C, 0x44):                 # string_ids_off, type_ids_off
+        bad = bytearray(dex)
+        struct.pack_into("<I", bad, off, 0xFFFFFF00)
+        with pytest.raises(ValueError, match="tables outside file"):
+            dex_class_names(bytes(bad))
+    # a huge size with a sane offset is the same corruption
+    bad = bytearray(dex)
+    struct.pack_into("<I", bad, 0x40, 0x7FFFFFFF)
+    with pytest.raises(ValueError):
+        dex_class_names(bytes(bad))
 
 
 # ---------------- manifest parsing (static XML) ----------------
@@ -300,7 +334,8 @@ def test_scan_app_sample(local_reader):
     s = scan_app(ctx, PKG)
     assert "error" not in s, s.get("error")
     assert s["package"] == PKG and s["dex_files"] == 2 and s["truncated"] is False
-    assert s["classes_scanned"] > 10000 and s["cached"] is False and s["scanned_at"] > 0
+    assert s["classes_scanned"] > 10000 and s["cached"] is False
+    assert _ISO_UTC.fullmatch(s["scanned_at"]) and s["scanned_ts"] > 0
     libs = {lib["name"]: lib for lib in s["libraries"]}
     assert libs["OkHttp"]["classes"] > 50 and libs["ZXing"]["classes"] > 50
     assert libs["OkHttp"]["website"].startswith("http")
@@ -353,3 +388,221 @@ def test_errors_are_results_not_exceptions(local_reader):
     assert got["error"].startswith("unexpected APK path") and local_reader == []
     got = inspect_apk(_Ctx(["/data/app/x/base.apk; id"]), "com.x")
     assert "error" in got and local_reader == []
+
+
+# ---------------- main activity choice (static XML) ----------------
+def _manifest_xml(body: str) -> bytes:
+    return (b'<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.app">'
+            b'<application>' + body.encode() + b'</application></manifest>')
+
+
+_MAIN_LAUNCHER = ('<intent-filter><action android:name="android.intent.action.MAIN"/>'
+                  '<category android:name="android.intent.category.LAUNCHER"/></intent-filter>')
+_MAIN_LEANBACK = ('<intent-filter><action android:name="android.intent.action.MAIN"/>'
+                  '<category android:name="android.intent.category.LEANBACK_LAUNCHER"/></intent-filter>')
+
+
+class _FakeApk:
+    """Only the accessors parse_manifest uses; pyaxmlparser's get_main_activity
+    (a set.pop(), hash-seed random for several launchers) must not be consulted."""
+
+    def get_min_sdk_version(self):
+        return "21"
+
+    def get_target_sdk_version(self):
+        return "30"
+
+    def get_max_sdk_version(self):
+        return None
+
+    def get_androidversion_name(self):
+        return "1.0"
+
+    def get_androidversion_code(self):
+        return "1"
+
+    def get_main_activity(self):
+        raise AssertionError("pyaxmlparser main activity must not be used")
+
+
+def test_main_activity_is_first_launcher_in_manifest_order():
+    etree = pytest.importorskip("lxml.etree")
+    xml = _manifest_xml(
+        '<activity android:name=".Old" android:enabled="false">' + _MAIN_LAUNCHER + '</activity>'
+        # MAIN and LAUNCHER in two different filters is not a launcher entry
+        '<activity android:name=".Split"><intent-filter><action android:name="android.intent.action.MAIN"/>'
+        '</intent-filter><intent-filter><category android:name="android.intent.category.LAUNCHER"/>'
+        '</intent-filter></activity>'
+        '<activity android:name=".Tv">' + _MAIN_LEANBACK + '</activity>'
+        '<activity android:name=".Main">' + _MAIN_LAUNCHER + '</activity>'
+        '<activity android:name=".Settings">' + _MAIN_LAUNCHER + '</activity>'
+        '<activity-alias android:name=".LegacyIcon" android:targetActivity=".Main">' + _MAIN_LAUNCHER
+        + '</activity-alias>')
+    for apk in (None, _FakeApk()):
+        for _ in range(3):
+            m = parse_manifest(etree.fromstring(xml), "com.example.app", apk)
+            assert m["main_activity"] == "com.example.app.Main"
+    # an alias is the entry point only when no activity is
+    xml = _manifest_xml('<activity android:name=".Main"/>'
+                        '<activity-alias android:name=".Icon" android:targetActivity=".Main">'
+                        + _MAIN_LAUNCHER + '</activity-alias>')
+    assert parse_manifest(etree.fromstring(xml), "com.example.app")["main_activity"] == "com.example.app.Icon"
+
+
+def test_main_activity_leanback_only_tv_app():
+    etree = pytest.importorskip("lxml.etree")
+    xml = _manifest_xml('<activity android:name=".Other"/>'
+                        '<activity android:name=".TvMain">' + _MAIN_LEANBACK + '</activity>')
+    assert parse_manifest(etree.fromstring(xml), "com.example.tv")["main_activity"] == "com.example.tv.TvMain"
+    assert parse_manifest(etree.fromstring(_manifest_xml('<activity android:name=".A"/>')),
+                          "com.example.app")["main_activity"] is None
+
+
+# ---------------- certificates (synthetic) ----------------
+def _cert(cn: str, issuer: str, key, signer_key, hash_alg, serial: int):
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    now = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+    name = lambda s: x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, s)])  # noqa: E731
+    return (x509.CertificateBuilder().subject_name(name(cn)).issuer_name(name(issuer))
+            .public_key(key.public_key()).serial_number(serial).not_valid_before(now)
+            .not_valid_after(now + datetime.timedelta(days=3650)).sign(signer_key, hash_alg))
+
+
+def _der(tag: int, body: bytes) -> bytes:
+    if len(body) < 0x80:
+        return bytes([tag, len(body)]) + body
+    ln = len(body).to_bytes((len(body).bit_length() + 7) // 8, "big")
+    return bytes([tag, 0x80 | len(ln)]) + ln + body
+
+
+def _pkcs7(certs_der: list[bytes]) -> bytes:
+    """SignedData carrying only a certificates SET, in the given order (a
+    jarsigner CERT.RSA has the SET DER-sorted, i.e. the shorter CA first)."""
+    id_data, id_signed = bytes.fromhex("06092a864886f70d010701"), bytes.fromhex("06092a864886f70d010702")
+    sd = _der(0x30, _der(0x02, b"\x01") + _der(0x31, b"") + _der(0x30, id_data)
+              + _der(0xA0, b"".join(certs_der)) + _der(0x31, b""))
+    return _der(0x30, id_signed + _der(0xA0, sd))
+
+
+class _CertZip:
+    def __init__(self, p7: bytes) -> None:
+        self.entries = {"META-INF/CERT.RSA": (0, len(p7), len(p7), 0), "classes.dex": (0, 1, 1, 0)}
+        self.cd_off = 0
+        self.p7 = p7
+
+    def extract(self, name):
+        return self.p7
+
+    def read(self, off, ln):
+        return b""
+
+
+def test_v1_signer_is_the_leaf_not_the_first_cert():
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import Encoding
+    ca_key, leaf_key = ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1())
+    ca = _cert("CA", "CA", ca_key, ca_key, hashes.SHA256(), 1).public_bytes(Encoding.DER)
+    leaf = _cert("App Signer, a longer name", "CA", leaf_key, ca_key, hashes.SHA256(), 2).public_bytes(Encoding.DER)
+    # DER SET OF ordering puts the shorter CA cert first, as jarsigner emits it
+    assert sorted([ca, leaf]) == [ca, leaf]
+    assert manifest._v1_certs(_CertZip(_pkcs7([ca, leaf]))) == [leaf]
+    sigs = manifest.apk_signatures(_CertZip(_pkcs7([ca, leaf])))
+    assert [(s["scheme"], s["subject"], s["issuer"]) for s in sigs] == [
+        ("v1", "CN=App Signer\\, a longer name", "CN=CA")]
+    # a lone self-signed cert is its own leaf
+    assert manifest._v1_certs(_CertZip(_pkcs7([ca]))) == [ca]
+    certs = [x509.load_der_x509_certificate(d) for d in (ca, leaf)]
+    assert manifest._signer_cert(certs) is certs[1] and manifest._signer_cert(certs[::-1]) is certs[1]
+    assert manifest._signer_cert(certs[:1]) is certs[0]
+
+
+def test_cert_algorithm_falls_back_to_dotted_oid():
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import Encoding
+    key = ec.generate_private_key(ec.SECP256R1())
+    named = _cert("Dev", "Dev", key, key, hashes.SHA256(), 1).public_bytes(Encoding.DER)
+    assert manifest._cert_info(named, "v2")["algorithm"] == "ecdsa-with-SHA256"
+    # ecdsa-with-SHA3-256 has no name in cryptography: show the OID, not "Unknown OID"
+    unnamed = _cert("Dev", "Dev", key, key, hashes.SHA3_256(), 1).public_bytes(Encoding.DER)
+    info = manifest._cert_info(unnamed, "v2")
+    assert info["algorithm"] == "2.16.840.1.101.3.4.3.10" and info["subject"] == "CN=Dev"
+    assert _ISO_UTC.fullmatch(info["not_before"]) and _ISO_UTC.fullmatch(info["not_after"])
+
+
+# ---------------- synthetic APK through a fake device ----------------
+def _apk_bytes(entries: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def serve(monkeypatch):
+    """Serve synthetic APK bytes through manifest._adb_range_reader; returns
+    the list of byte-range reads."""
+    def _serve(data: bytes) -> list[tuple[int, int]]:
+        reads: list[tuple[int, int]] = []
+
+        def reader(adb, path):
+            def read_range(off, ln):
+                reads.append((off, ln))
+                return data[off:off + ln]
+            return len(data), read_range
+        monkeypatch.setattr(manifest, "_adb_range_reader", reader)
+        return reads
+    return _serve
+
+
+def test_apk_path_allow_list_includes_adoptable_storage(serve):
+    ok = ("/mnt/expand/57f8f4bc-abf4-655f-bf67-946fc0f9f25b/app/com.example-1/base.apk",
+          "/mnt/expand/57f8f4bc-abf4-655f-bf67-946fc0f9f25b/app/~~Xy==/com.example-Ab==/split_config.apk",
+          "/data/app-private/com.example-1.apk", "/data/app/~~a==/com.x-b==/base.apk",
+          "/system/priv-app/Foo/Foo.apk", "/apex/com.android.x/app/Y/Y.apk")
+    bad = ("/mnt/expand/../app/x.apk", "/mnt/expand/x.apk", "/mnt/expand//app/x.apk", "/sdcard/x.apk",
+           "/data/app/x/base.apk\n", "/data/app/x/base.apk; id", "/data/local/tmp/x.apk", "data/app/x.apk")
+    assert all(manifest._APK_PATH_RE.match(p) for p in ok)
+    assert not any(manifest._APK_PATH_RE.match(p) for p in bad)
+    assert not manifest._PKG.match("com.example\n")
+    # an app moved to adopted storage is inspected rather than refused
+    reads = serve(_apk_bytes({"classes.dex": b"x"}))
+    got = inspect_apk(_Ctx([ok[0], ok[1]]), "com.example")
+    assert got["error"] == "no AndroidManifest.xml in APK" and reads      # past the path check, read the zip
+    assert got["apk_path"] == ok[0]
+
+
+def test_scan_synthetic_apk_timestamps_and_corrupt_dex(serve):
+    good = _mini_dex([b"Lcom/appsflyer/AppsFlyerLib;", b"Lcom/example/Main;"])
+    ctx = _Ctx([APK_PATH])
+    serve(_apk_bytes({"classes.dex": good}))
+    before = time.time()
+    s = scan_app(ctx, PKG)
+    assert "error" not in s, s.get("error")
+    assert s["classes_scanned"] == 2 and s["dex_files"] == 1 and s["truncated"] is False
+    assert [t["name"] for t in s["trackers"]] == ["AppsFlyer"]
+    # scanned_at is ISO-8601 UTC (like the certificate dates), scanned_ts the epoch behind it
+    assert _ISO_UTC.fullmatch(s["scanned_at"])
+    assert before - 1 <= s["scanned_ts"] <= time.time() + 1
+    assert abs(datetime.datetime.fromisoformat(s["scanned_at"]).timestamp() - s["scanned_ts"]) < 1
+    hit = scan_app(ctx, PKG)
+    assert hit["cached"] is True and hit["scanned_at"] == s["scanned_at"]
+
+    # a dex whose string_ids table points outside the file is a scan error,
+    # never a clean "0 classes, no trackers" result (and never cached)
+    bad = bytearray(good)
+    struct.pack_into("<I", bad, 0x3C, 0xFFFFFF00)
+    ctx = _Ctx([APK_PATH])
+    serve(_apk_bytes({"classes.dex": bytes(bad), "classes2.dex": good}))
+    s = scan_app(ctx, PKG)
+    assert s["error"] == "classes.dex: dex tables outside file" and s["cached"] is False
+    assert "trackers" not in s and ctx.store.snapshots == {}
+    s = scan_app(ctx, PKG, refresh=True)
+    assert s["error"] == "classes.dex: dex tables outside file"
+    # a dex entry that is not a dex at all is reported the same way
+    serve(_apk_bytes({"classes.dex": b"PK\x03\x04" + b"\0" * 200}))
+    assert scan_app(_Ctx([APK_PATH]), PKG)["error"] == "classes.dex: not a dex file"

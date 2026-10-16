@@ -991,6 +991,7 @@
   }
   $("#am-user").addEventListener("change", function () {
     amUser = this.value === "all" ? "all" : parseInt(this.value, 10);
+    amPending = amSel;  // the pane is per user: re-open the shown app once the new list is in
     loadAppManager();
   });
   // the list endpoint does not know which apps have a process: one /running read per list load
@@ -1051,7 +1052,8 @@
         (amUser === "all" && multi && ui.length
           ? ' <span class="pill mut" title="Android users this package is installed for">' +
             (ui.length > 1 ? "users " : "user ") + esc(ui.join(", ")) + "</span>" : "") +
-        (a.installed === false ? ' <span class="pill crit" title="Removed for this user (debloated); still on the device">not installed</span>' : "") +
+        (a.maybe_hidden ? ' <span class="pill warn" title="Gone from the package list but its data directory is still there: most likely frozen with pm hide (the detail pane reads the real flag)">hidden (frozen)</span>' :
+          a.installed === false ? ' <span class="pill crit" title="Removed for this user (debloated); still on the device">not installed</span>' : "") +
         (!a.enabled && a.installed !== false ? ' <span class="pill warn">disabled</span>' : "") +
         (run ? ' <span class="pill good" title="pids ' + esc(run.pids.join(", ")) + " · " + fmtBytes(run.rss_kb * 1024) + ' resident">running</span>' : "") +
         (a.godmode ? ' <span class="pill crit">god-mode</span>' : "") + "</div>" +
@@ -1209,13 +1211,15 @@
     Object.keys(amChecked).forEach(function (p) { amToggleCheck(p, false); });
     $("#am-bulk-results").innerHTML = "";
   });
-  // data-* of a button -> action params: "true"/"false" become booleans, pid a number
+  // data-* of a button -> action params: the contract's boolean fields become booleans, pid a
+  // number; free strings stay strings (a pref key may literally be named "true")
+  var AM_BOOL_PARAMS = { keep_data: 1, enabled: 1, whitelist: 1, restrict_background: 1, block: 1, allowed: 1, confirm: 1 };
   function amParamsFrom(el, skip) {
     var out = {}, ds = el.dataset;
     Object.keys(ds).forEach(function (k) {
       if (k === "act" || k === "pkg" || k === "batch" || k === "destructive" || (skip && skip.indexOf(k) >= 0)) return;
       var v = ds[k];
-      out[k] = v === "true" ? true : v === "false" ? false : k === "pid" ? parseInt(v, 10) : v;
+      out[k] = AM_BOOL_PARAMS[k] ? v === "true" : k === "pid" ? parseInt(v, 10) : v;
     });
     return out;
   }
@@ -1243,10 +1247,36 @@
     var box = into || $("#am-bulk-results");
     box.innerHTML = '<div class="hint" style="padding:6px 0">running ' + esc(action) + " on " + packages.length + " app" +
       (packages.length === 1 ? "" : "s") + "…</div>";
-    postJSON("/api/appmanager/batch", { device: DEV, action: action, packages: packages, user: amActUser(),
-      confirm: destructive, options: options || {} })
-      .then(function (res) { renderAmResults(box, action, res); amAfterBulk(); })
+    // the batch route takes one user: in All-users mode each app is acted on where it lives, so the
+    // selection is grouped by user and sent one request per user, in order
+    var byUser = {};
+    packages.forEach(function (p) { var u = amActUser(p); (byUser[u] = byUser[u] || []).push(p); });
+    var users = Object.keys(byUser), out = [];
+    users.reduce(function (chain, u) {
+      return chain.then(function () {
+        return postJSON("/api/appmanager/batch", { device: DEV, action: action, packages: byUser[u], user: parseInt(u, 10),
+          confirm: destructive, options: options || {} }).then(function (res) { out.push(res); });
+      });
+    }, Promise.resolve())
+      .then(function () { renderAmResults(box, action, users.length === 1 ? out[0] : amMergeBatch(out, users, byUser)); amAfterBulk(); })
       .catch(function () { box.innerHTML = '<div class="hint">request failed</div>'; toast("batch request failed", "crit"); });
+  }
+  // per-user batch responses -> one response shaped like the route's; a refused request (no results)
+  // becomes one FAIL line per package it covered so nothing is silently dropped
+  function amMergeBatch(responses, users, byUser) {
+    var j = { results: [], ok_count: 0, fail_count: 0, note: "" };
+    responses.forEach(function (res, i) {
+      var r = (res && res.j) || {};
+      if (res && res.ok && r.results) {
+        j.results = j.results.concat(r.results);
+        j.ok_count += r.ok_count || 0; j.fail_count += r.fail_count || 0;
+        if (r.note && j.note.indexOf(r.note) < 0) j.note += (j.note ? " · " : "") + r.note;
+        return;
+      }
+      var why = r.output || r.error || ("HTTP " + (res ? res.status : "?") + (r.detail ? " " + r.detail : ""));
+      byUser[users[i]].forEach(function (p) { j.results.push({ package: p, ok: false, output: why }); j.fail_count++; });
+    });
+    return { ok: true, status: 200, j: j };
   }
   // postJSON result whose body is {results:[{package, ok, output}], ok_count, fail_count, note?}
   // -> toast + collapsible per-package list; anything else (400 demo refusal, 404) is one hint line
@@ -1479,11 +1509,15 @@
        url:    null -> the tab renders from the detail payload (GET /api/appmanager/app/{pkg});
                function(pkg) -> the GET the tab needs; its result is cached per device+pkg+url
        render: function(data, pkg) -> html for #am-dbody
-       after:  optional function(data, pkg), runs once the html is in place (follow-up loads)
+       after:  optional function(data, pkg, force), runs once the html is in place (follow-up
+               loads; force is the refresh button's, so they re-read too)
      Loads are lazy (on first show) and cached in amTabCache; amInvalidate(pkg) drops a package's
      entries after an action; the refresh button re-reads the current tab. Stage 2 fills the
      stub renders (components, scanner, manifest, signatures, prefs) and gives them a url. */
   function amAppUrl(pkg, suffix) { return "/api/appmanager/app/" + encodeURIComponent(pkg) + (suffix || ""); }
+  // the detail and controls reads are per Android user on the backend: they carry the user the
+  // pane's buttons act on, which also keeps one cache entry per user
+  function amUserUrl(pkg, suffix) { return amAppUrl(pkg, suffix) + "?user=" + amActUser(pkg); }
   var AM_TABS = [
     { id: "overview", label: "Overview", url: null, render: renderAmTabOverview, after: afterAmTabOverview },
     { id: "permissions", label: "Permissions", url: null, render: renderAmTabPermissions },
@@ -1493,7 +1527,7 @@
     { id: "manifest", label: "Manifest", url: amManifestUrl, render: renderAmTabManifest, after: afterAmTabManifest },
     { id: "signatures", label: "Signatures", url: amManifestUrl, render: renderAmTabSignatures, after: afterAmTabSignatures },
     { id: "storage", label: "Storage", url: function (pkg) { return amAppUrl(pkg, "/storage"); }, render: renderAmTabStorage },
-    { id: "prefs", label: "Prefs & DBs", url: function (pkg) { return amAppUrl(pkg, "/prefs"); }, render: renderAmTabPrefs, after: afterAmTabPrefs },
+    { id: "prefs", label: "Prefs & DBs", url: function (pkg) { return amUserUrl(pkg, "/prefs"); }, render: renderAmTabPrefs, after: afterAmTabPrefs },
     { id: "backups", label: "Backups", url: function () { return "/api/backups"; }, render: renderAmTabBackups },
     { id: "history", label: "History", url: function () { return "/api/appmanager/history?limit=200"; }, render: renderAmTabHistory },
   ];
@@ -1507,7 +1541,7 @@
     if (!force && amTabCache[key]) return Promise.resolve(amTabCache[key]);
     return amGet(url).then(function (d) { amTabCache[key] = d; return d; });
   }
-  function amDetailOf(pkg) { return amTabCache[amCacheKey(pkg, amAppUrl(pkg))] || null; }
+  function amDetailOf(pkg) { return amTabCache[amCacheKey(pkg, amUserUrl(pkg))] || null; }
   function loadAmDetail(pkg, keepTab, force) {
     amSel = pkg;
     void keepTab;  // the tab is remembered per session now: a newly picked app opens on the same tab
@@ -1537,10 +1571,10 @@
     $$("#am-tabs button[data-tab]").forEach(function (b) { b.classList.toggle("on", b.dataset.tab === amTab); });
     var pkg = amSel, body = $("#am-dbody");
     body.innerHTML = '<div class="empty">reading ' + esc(pkg) + " …</div>";
-    amTabLoad(pkg, spec.url ? spec.url(pkg) : amAppUrl(pkg), force).then(function (d) {
+    amTabLoad(pkg, spec.url ? spec.url(pkg) : amUserUrl(pkg), force).then(function (d) {
       if (amSel !== pkg || amTab !== spec.id) return;  // the user moved on while this loaded
       body.innerHTML = spec.render(d, pkg);
-      if (spec.after) spec.after(d, pkg);
+      if (spec.after) spec.after(d, pkg, force);
       applyGlobalSearch();
     }).catch(function (err) {
       if (amSel !== pkg || amTab !== spec.id) return;
@@ -1636,8 +1670,8 @@
     var procs = d.running ? amSec("Processes", '<div id="am-procs">' + renderAmProcs(run, pkg) + "</div>") : "";
     return state + actions + linkrow + ident + procs + controls;
   }
-  function afterAmTabOverview(d, pkg) {
-    loadAmControls(pkg);
+  function afterAmTabOverview(d, pkg, force) {
+    loadAmControls(pkg, force);
     var pids = (d.running || {}).pids || [];
     if (pids.some(function (p) { return !amProcs[p]; })) {  // names come from /running, not the detail
       loadAmRunning(function () {
@@ -1647,7 +1681,7 @@
     }
   }
   function loadAmControls(pkg, force) {
-    amTabLoad(pkg, amAppUrl(pkg, "/controls"), force).then(function (c) {
+    amTabLoad(pkg, amUserUrl(pkg, "/controls"), force).then(function (c) {
       var box = $("#am-controls");
       if (box && amSel === pkg) box.innerHTML = renderAmControls(c, pkg);
     }).catch(function (err) {
@@ -1798,7 +1832,7 @@
   // remembered tab has no detail yet); amDetailOf is non-null afterwards, so this runs at most once
   function amWithDetail(pkg, tab) {
     if (amDetailOf(pkg)) return;
-    amTabLoad(pkg, amAppUrl(pkg)).then(function () {
+    amTabLoad(pkg, amUserUrl(pkg)).then(function () {
       if (amSel === pkg && amTab === tab) amShowTab(tab);
     }).catch(function () { /* the tab already shows what it has */ });
   }
@@ -2160,19 +2194,19 @@
       "Prefs are read with cat through su; a Save rewrites the file and fixes its owner and SELinux label. Databases are pulled " +
       "(with -wal/-shm) and opened read-only on this computer; the app is never touched.</div>";
   }
-  function afterAmTabPrefs(d, pkg) {
-    amLoadDbList(pkg);
+  function afterAmTabPrefs(d, pkg, force) {
+    amLoadDbList(pkg, force);
     var f = amPrefSel[pkg];
-    if (f && (d.files || []).some(function (x) { return x.name === f; })) amLoadPrefFile(pkg, f);
+    if (f && (d.files || []).some(function (x) { return x.name === f; })) amLoadPrefFile(pkg, f, force);
   }
-  function amLoadPrefFile(pkg, file) {
+  function amLoadPrefFile(pkg, file, force) {
     if (!pkg || !file) return;
     amPrefSel[pkg] = file;
     $$("#am-dbody .am-pfile[data-pfile]").forEach(function (r) { r.classList.toggle("sel", r.dataset.pfile === file); });
     var box = $("#am-pref-view");
     if (!box) return;
     box.innerHTML = '<div class="hint">reading ' + esc(file) + "…</div>";
-    amTabLoad(pkg, amAppUrl(pkg, "/prefs/" + encodeURIComponent(file))).then(function (p) {
+    amTabLoad(pkg, amUserUrl(pkg, "/prefs/" + encodeURIComponent(file)), force).then(function (p) {
       var b = $("#am-pref-view");
       if (b && amSel === pkg && amTab === "prefs") b.innerHTML = renderAmPrefFile(p, pkg, file);
     }).catch(function (err) {
@@ -2244,8 +2278,8 @@
     if (type === "float" && isNaN(parseFloat(val))) { toast("value must be a number", "warn"); return; }
     amAction("prefs-set", { package: pkg, file: file, key: key, type: type, value: amPrefValue(type, val) });
   }
-  function amLoadDbList(pkg) {
-    amTabLoad(pkg, amAppUrl(pkg, "/db")).then(function (d) {
+  function amLoadDbList(pkg, force) {
+    amTabLoad(pkg, amAppUrl(pkg, "/db"), force).then(function (d) {
       var box = $("#am-db-list");
       if (!box || amSel !== pkg || amTab !== "prefs") return;
       var files = d.files || [];
@@ -2254,13 +2288,13 @@
           '</span><span class="fsz">' + fmtBytes(f.size) + "</span></div>";
       }).join("") : (d.error ? "" : '<div class="hint">no databases</div>'));
       var s = amDbSel[pkg];
-      if (s && files.some(function (f) { return f.name === s.file; })) amLoadDb(pkg, s.file, s.table, s.limit);
+      if (s && files.some(function (f) { return f.name === s.file; })) amLoadDb(pkg, s.file, s.table, s.limit, force);
     }).catch(function (err) {
       var box = $("#am-db-list");
       if (box && amSel === pkg) box.innerHTML = amRootHint(err.message);
     });
   }
-  function amLoadDb(pkg, file, table, limit) {
+  function amLoadDb(pkg, file, table, limit, force) {
     if (!pkg || !file) return;
     limit = limit || (amDbSel[pkg] || {}).limit || 200;
     amDbSel[pkg] = { file: file, table: table || null, limit: limit };
@@ -2269,7 +2303,7 @@
     if (!box) return;
     box.innerHTML = '<div class="hint">pulling ' + esc(file) + (table ? " · " + esc(table) : "") + "…</div>";
     var url = amAppUrl(pkg, "/db/" + encodeURIComponent(file) + "?limit=" + limit + (table ? "&table=" + encodeURIComponent(table) : ""));
-    amTabLoad(pkg, url).then(function (d) {
+    amTabLoad(pkg, url, force).then(function (d) {
       var b = $("#am-db-view");
       if (b && amSel === pkg && amTab === "prefs") b.innerHTML = renderAmDb(d, pkg, file);
     }).catch(function (err) {

@@ -501,21 +501,21 @@ tbody tr.rowlink{cursor:pointer}
 .am-hash:hover{color:var(--accent);border-bottom-color:var(--accent)}
 .am-sig-res{padding:6px 0 0;font-size:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .am-sig-res:empty{display:none}
-.am-pdb{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
-@media (max-width:1250px){.am-pdb{grid-template-columns:1fr}}
-.am-pdb-col{min-width:0}
+/* two columns only while each can hold a prefs row (~340px); narrower panes stack, whatever the viewport */
+.am-pdb{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:0 14px}
+.am-pdb-col{min-width:0;overflow:hidden}
 .am-pfile{display:flex;gap:8px;align-items:center;padding:6px 8px;margin:0 -8px;border-radius:var(--r-sm);cursor:pointer;font-size:12px}
 .am-pfile:hover{background:var(--bg-elev)}
 .am-pfile.sel{background:var(--accent-dim)}
 .am-pfile .fn{flex:1;min-width:0;font-family:var(--ff-mono);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .am-pfile .fsz{font-family:var(--ff-mono);font-size:10.5px;color:var(--fg-mut);flex:0 0 auto}
 .am-pref-h{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 6px;font-size:12.5px}
-.am-pref{display:grid;grid-template-columns:minmax(80px,1fr) auto minmax(80px,1.4fr) auto;gap:4px 8px;align-items:center;
+.am-pref{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1.4fr) auto;gap:4px 8px;align-items:center;
   padding:5px 0;border-bottom:1px solid var(--border-soft);font-size:11.5px}
 .am-pref:last-child{border-bottom:0}
 .am-pref .pk{font-family:var(--ff-mono);word-break:break-all;min-width:0}
 .am-pref .pv{font-family:var(--ff-mono);color:var(--fg-dim);word-break:break-all;min-width:0}
-.am-pref .pa{display:flex;gap:4px;justify-content:flex-end}
+.am-pref .pa{display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap}
 .am-pref .am-pedit,.am-pref-add input,.am-pref-add select,.am-pref-h select{background:var(--bg);border:1px solid var(--border);
   border-radius:var(--r-sm);color:var(--fg);padding:4px 7px;font-size:11.5px;font-family:var(--ff-mono);width:100%;min-width:0}
 .am-pref-h select{width:auto}

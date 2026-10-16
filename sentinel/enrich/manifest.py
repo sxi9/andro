@@ -25,6 +25,7 @@ import struct
 import tempfile
 import time
 import zipfile
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from . import signatures
@@ -33,9 +34,11 @@ from .labels import RemoteZip, _adb_range_reader
 log = logging.getLogger("sentinel.manifest")
 
 _NS = "{http://schemas.android.com/apk/res/android}"
-_PKG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.]{1,254}$")
-# where `pm path` may legitimately point; anything else never reaches a shell
-_APK_PATH_RE = re.compile(r"^/(data/app|system|product|system_ext|vendor|apex|odm|oem)/.*\.apk$")
+_PKG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.]{1,254}\Z")
+# where `pm path` may legitimately point (incl. adoptable storage, /mnt/expand/<uuid>/app);
+# anything else never reaches a shell
+_APK_PATH_RE = re.compile(r"^/(data/app|data/app-private|mnt/expand/[0-9a-fA-F-]+/app"
+                          r"|system|product|system_ext|vendor|apex|odm|oem)/.*\.apk\Z")
 _DEX_RE = re.compile(r"^classes(\d*)\.dex$")
 _SO_RE = re.compile(r"^lib/([^/]+)/([^/]+\.so)$")
 _SIGFILE_RE = re.compile(r"^META-INF/[^/]+\.(RSA|DSA|EC|SF|MF)$", re.I)
@@ -49,8 +52,8 @@ _PROT_FLAGS = ((0x10, "privileged"), (0x20, "development"), (0x40, "appop"), (0x
                (0x8000, "vendorPrivileged"), (0x10000, "systemTextClassifier"),
                (0x20000, "wellbeing"), (0x40000, "documenter"), (0x80000, "configurator"),
                (0x100000, "incidentReportApprover"), (0x200000, "appPredictor"),
-               (0x400000, "companion"), (0x800000, "retailDemo"), (0x1000000, "recents"),
-               (0x2000000, "role"), (0x4000000, "knownSigner"), (0x8000000, "module"))
+               (0x400000, "module"), (0x800000, "companion"), (0x1000000, "retailDemo"),
+               (0x2000000, "recents"), (0x4000000, "role"), (0x8000000, "knownSigner"))
 
 # APK Signing Block (https://source.android.com/docs/security/features/apksigning/v2)
 _SIG_MAGIC = b"APK Sig Block 42"
@@ -265,12 +268,23 @@ def _protection_level(raw: str | None) -> str | None:
     return "|".join(parts)
 
 
+_MAIN_ACTION = "android.intent.action.MAIN"
+_LAUNCHER_CATS = ("android.intent.category.LAUNCHER",
+                  "android.intent.category.LEANBACK_LAUNCHER")   # TV-only apps
+
+
 def _find_main(activities: list[dict]) -> str | None:
-    for a in activities:
-        for f in a.get("intent_filters") or []:
-            if ("android.intent.action.MAIN" in f["actions"]
-                    and "android.intent.category.LAUNCHER" in f["categories"]):
-                return a["name"]
+    """First enabled activity (or alias) in manifest order with a filter
+    carrying both MAIN and LAUNCHER, else MAIN and LEANBACK_LAUNCHER. Done
+    here rather than via pyaxmlparser, whose set.pop() is hash-seed random
+    when an app has several launcher entries."""
+    for cat in _LAUNCHER_CATS:
+        for a in activities:
+            if a.get("enabled") is False:
+                continue
+            for f in a.get("intent_filters") or []:
+                if _MAIN_ACTION in f["actions"] and cat in f["categories"]:
+                    return a["name"]
     return None
 
 
@@ -328,18 +342,12 @@ def parse_manifest(root, pkg: str, apk=None) -> dict:
         if name and val is not None:
             meta[name] = str(val)
 
-    main = None
-    if apk is not None:
-        try:
-            main = apk.get_main_activity() or None
-        except Exception:  # noqa: BLE001 - fall back to our own scan
-            main = None
     return {
         "package": root.get("package") or pkg,
         "version_name": apk.get_androidversion_name() if apk else root.get(_NS + "versionName"),
         "version_code": _int(apk.get_androidversion_code() if apk else root.get(_NS + "versionCode")),
         "min_sdk": min_sdk, "target_sdk": target_sdk, "max_sdk": max_sdk,
-        "main_activity": _resolve_name(main, pkg) or _find_main(comps["activities"]),
+        "main_activity": _find_main(comps["activities"]),
         "debuggable": _bool(app.get(_NS + "debuggable"), False),
         "allow_backup": _bool(app.get(_NS + "allowBackup"), True),
         "test_only": _bool(app.get(_NS + "testOnly"), False),
@@ -362,6 +370,9 @@ def _cert_info(der: bytes, scheme: str) -> dict:
     nb = getattr(cert, "not_valid_before_utc", None) or cert.not_valid_before
     na = getattr(cert, "not_valid_after_utc", None) or cert.not_valid_after
     oid = cert.signature_algorithm_oid
+    alg = getattr(oid, "_name", None)
+    if not alg or alg == "Unknown OID":     # cryptography's placeholder for unnamed OIDs
+        alg = oid.dotted_string
     return {
         "scheme": scheme,
         "subject": cert.subject.rfc4514_string(),
@@ -372,8 +383,18 @@ def _cert_info(der: bytes, scheme: str) -> dict:
         "sha256": hashlib.sha256(der).hexdigest(),
         "sha1": hashlib.sha1(der).hexdigest(),
         "md5": hashlib.md5(der).hexdigest(),
-        "algorithm": getattr(oid, "_name", None) or oid.dotted_string,
+        "algorithm": alg,
     }
+
+
+def _signer_cert(certs: list) -> Any:
+    """The leaf of a PKCS#7 certificate set: the one that issued no other
+    cert in it (the SET is DER-sorted, so for a chain certs[0] is usually
+    the CA). Falls back to the first."""
+    for c in certs:
+        if not any(o is not c and o.issuer == c.subject for o in certs):
+            return c
+    return certs[0]
 
 
 def _v1_certs(rz: RemoteZip) -> list[bytes]:
@@ -389,7 +410,7 @@ def _v1_certs(rz: RemoteZip) -> list[bytes]:
             log.debug("v1 cert %s: %s", name, e)
             continue
         if certs:
-            out.append(certs[0].public_bytes(Encoding.DER))
+            out.append(_signer_cert(certs).public_bytes(Encoding.DER))
     return out
 
 
@@ -583,27 +604,28 @@ def dex_class_names(dex: bytes) -> list[str]:
         raise ValueError("not a dex file")
     ssz, soff, tsz, toff = struct.unpack_from("<IIII", dex, 0x38)
     n = len(dex)
+    # a table outside the file is a corrupt or short dex; say so instead of
+    # returning a clean-looking empty list
+    if soff + 4 * ssz > n or toff + 4 * tsz > n:
+        raise ValueError("dex tables outside file")
     out: list[str] = []
-    try:
-        for i in range(min(tsz, (n - toff) // 4 if toff < n else 0)):
-            sidx = struct.unpack_from("<I", dex, toff + 4 * i)[0]
-            if sidx >= ssz:
-                continue
-            pos = struct.unpack_from("<I", dex, soff + 4 * sidx)[0]
-            if pos >= n:
-                continue
-            # uleb128 utf16 length, then MUTF-8 bytes up to NUL
-            while pos < n and dex[pos] & 0x80:
-                pos += 1
+    for i in range(tsz):
+        sidx = struct.unpack_from("<I", dex, toff + 4 * i)[0]
+        if sidx >= ssz:
+            continue
+        pos = struct.unpack_from("<I", dex, soff + 4 * sidx)[0]
+        if pos >= n:
+            continue
+        # uleb128 utf16 length, then MUTF-8 bytes up to NUL
+        while pos < n and dex[pos] & 0x80:
             pos += 1
-            end = dex.find(b"\0", pos)
-            if end < 0:
-                continue
-            s = dex[pos:end]
-            if s[:1] == b"L" and s[-1:] == b";":
-                out.append(s[1:-1].decode("utf-8", "replace").replace("/", "."))
-    except struct.error:
-        pass
+        pos += 1
+        end = dex.find(b"\0", pos)
+        if end < 0:
+            continue
+        s = dex[pos:end]
+        if s[:1] == b"L" and s[-1:] == b";":
+            out.append(s[1:-1].decode("utf-8", "replace").replace("/", "."))
     return out
 
 
@@ -644,8 +666,10 @@ def scan_app(dctx, pkg: str, refresh: bool = False) -> dict:
                          "signatures_matched": sorted(rec["signatures_matched"]),
                          "classes": rec["classes"], "components": rec.get("components", [])})
     trackers.sort(key=lambda t: (-t["classes"], t["name"]))
+    ts = time.time()
     result.update({"package": pkg, "trackers": trackers, "apk_path": apk_path, "apk_size": size,
-                   "scanned_at": time.time(), "cached": False})
+                   "scanned_at": datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds"),
+                   "scanned_ts": ts, "cached": False})
     _cache_put(dctx, "scans", pkg, key, result)
     return result
 
@@ -666,8 +690,9 @@ def _scan(rz: _ApkZip) -> dict:
         try:
             names.update(dex_class_names(data))
         except ValueError as e:
-            log.debug("dex %s: %s", n, e)
-            truncated = True
+            # a corrupt dex makes the whole scan untrustworthy: surface it
+            # as the scan's error rather than a clean 0-class result
+            raise ValueError(f"{n}: {e}") from None
         del data
         scanned += 1
     libs = signatures.match_prefixes(names, signatures.LIBRARIES)

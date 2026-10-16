@@ -93,8 +93,8 @@ class FakeAdb:
             return _LS_DATA if su else ""
         if cmd.startswith("dumpsys package"):
             return "Packages:\n  Package [com.android.chrome] (1):\n    versionCode=1 minSdk=24 targetSdk=34\n"
-        if cmd.startswith("dumpsys appops"):
-            return ""
+        if cmd.startswith("appops get --user 0 "):
+            return "No operations.\n"
         if cmd.startswith("pm path"):
             return "package:/product/app/Chrome/Chrome.apk\n"
         raise AssertionError(f"unexpected command: {cmd}")
@@ -290,9 +290,40 @@ def test_app_detail_users_installed_and_meta():
     assert res["users_installed"] == [10]
     assert res["meta"] == meta[CHROME]
     assert res["detail"]["version"] == 1
+    assert res["appops"] == []
     assert "meta" not in appmanager.app_detail(c, "com.a")
     assert appmanager.app_detail(c, "com.a")["users_installed"] == [0, 10]
     _user_args_are_ints(c.adb)
+
+
+class _HiddenAdb(FakeAdb):
+    """Chrome is absent from user 0's plain listing like a debloated app, but
+    its data dir is still there (what `pm hide` leaves behind)."""
+    def shell_sync(self, cmd, su=False, timeout=60):
+        if cmd.startswith("ls -d /data/user/"):
+            self.cmds.append((cmd, su))
+            assert su, "data dirs are only visible as root"
+            return f"/data/user/0/{CHROME}\n" if f"/data/user/0/{CHROME}" in cmd else ""
+        return super().shell_sync(cmd, su, timeout)
+
+
+def test_list_apps_hints_hidden_apps_by_their_kept_data_dir():
+    c = Ctx(root=True)
+    c.adb = _HiddenAdb()
+    by = {a["package"]: a for a in appmanager.list_apps(c, "all", user=0)["apps"]}
+    # still "not installed" for the listing (pm cannot tell hide from
+    # uninstall), but flagged so the UI can say "hidden (frozen)"
+    assert by[CHROME]["installed"] is False and by[CHROME]["maybe_hidden"] is True
+    assert by["com.a"]["maybe_hidden"] is False and by[WEBAPK]["maybe_hidden"] is False
+    ls = [cmd for cmd, su in c.adb.cmds if cmd.startswith("ls -d /data/user/")]
+    assert ls == [f"ls -d /data/user/0/{CHROME} 2>/dev/null"]   # one batched probe, quoted paths
+    # for user 10 chrome is installed: nothing to probe
+    assert all(a["maybe_hidden"] is False for a in appmanager.list_apps(c, "all", user=10)["apps"])
+    # without root the hint is skipped rather than guessed
+    c2 = Ctx(root=False)
+    by = {a["package"]: a for a in appmanager.list_apps(c2, "all", user=0)["apps"]}
+    assert by[CHROME]["maybe_hidden"] is False
+    assert not any(cmd.startswith("ls -d /data/user/") for cmd, _ in c2.adb.cmds)
 
 
 def test_ls_paths_parser():

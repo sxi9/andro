@@ -295,20 +295,101 @@ def test_prevent_background_two_ops():
     c = Ctx()
     assert _act(c, "prevent-background", enabled=True)["ok"]
     assert _act(c, "prevent-background", enabled=False)["ok"]
-    assert c.shell_cmds() == ["appops set com.x RUN_IN_BACKGROUND ignore",
-                              "appops set com.x RUN_ANY_IN_BACKGROUND ignore",
-                              "appops set com.x RUN_IN_BACKGROUND allow",
-                              "appops set com.x RUN_ANY_IN_BACKGROUND allow"]
+    assert c.shell_cmds() == ["appops set --user 0 com.x RUN_IN_BACKGROUND ignore",
+                              "appops set --user 0 com.x RUN_ANY_IN_BACKGROUND ignore",
+                              "appops set --user 0 com.x RUN_IN_BACKGROUND allow",
+                              "appops set --user 0 com.x RUN_ANY_IN_BACKGROUND allow"]
 
 
 def test_appops_deny_dangerous_and_reset():
     c = Ctx()
     assert _act(c, "appops-deny-dangerous", confirm=True)["ok"]
     cmd = c.shell_cmds()[0]
-    assert cmd.startswith("appops set com.x COARSE_LOCATION ignore; appops set com.x FINE_LOCATION ignore")
-    assert cmd.endswith("appops set com.x SYSTEM_ALERT_WINDOW ignore")
+    assert cmd.startswith("appops set --user 0 com.x COARSE_LOCATION ignore; "
+                          "appops set --user 0 com.x FINE_LOCATION ignore")
+    assert cmd.endswith("appops set --user 0 com.x SYSTEM_ALERT_WINDOW ignore")
     assert cmd.count("appops set") == 13 and ";" in cmd
-    assert _act(c, "appops-reset")["ok"] and c.shell_cmds()[-1] == "appops reset com.x"
+    assert _act(c, "appops-reset")["ok"] and c.shell_cmds()[-1] == "appops reset --user 0 com.x"
+
+
+def test_per_user_actions_name_the_selected_user():
+    """A work-profile pick (user 10) must reach appops / pm grant / pm enable /
+    sensorservice / clear-cache, not the owner's instance."""
+    c = Ctx(snaps={"manifests": MANIFEST}, responses={"d=/data/user/": "cleared\n"})
+    for action, p in (("appop", {"op": "CAMERA", "mode": "ignore"}),
+                      ("grant", {"permission": "android.permission.CAMERA"}),
+                      ("revoke", {"permission": "android.permission.CAMERA"}),
+                      ("enable-component", {"component": "com.x/.A"}),
+                      ("disable-component", {"component": "com.x/.A"}),
+                      ("appops-reset", {}), ("appops-deny-dangerous", {"confirm": True}),
+                      ("prevent-background", {"enabled": True}),
+                      ("sensors", {"state": "idle"}), ("sensors", {"state": "reset"}),
+                      ("clear-cache", {}),
+                      ("ifw-block", {"component": "com.x/.AdActivity", "confirm": True})):
+        r = _act(c, action, user=10, **p)
+        assert r["ok"], (action, r)
+    cmds = c.shell_cmds()
+    assert "appops set --user 10 com.x CAMERA ignore" in cmds
+    assert "pm grant --user 10 com.x android.permission.CAMERA" in cmds
+    assert "pm revoke --user 10 com.x android.permission.CAMERA" in cmds
+    assert "pm enable --user 10 com.x/.A" in cmds and "pm disable --user 10 com.x/.A" in cmds
+    assert "appops reset --user 10 com.x" in cmds
+    assert any(cmd.startswith("appops set --user 10 com.x COARSE_LOCATION ignore; ") for cmd in cmds)
+    assert "appops set --user 10 com.x RUN_IN_BACKGROUND ignore" in cmds
+    assert "cmd sensorservice set-uid-state com.x idle --user 10" in cmds
+    assert "cmd sensorservice reset-uid-state com.x --user 10" in cmds
+    assert ("pm disable --user 10 com.x/com.x.AdActivity", True) in c.adb.cmds
+    cc = [cmd for cmd, su in c.adb.cmds if cmd.startswith("d=/data/user/10/com.x;") and su]
+    assert len(cc) == 1 and '"$d"/cache/*' in cc[0] and "/data/data" not in cc[0]
+    # every --user argument is a plain integer
+    for cmd in cmds:
+        assert not re.search(r"--user (?!\d+(\s|$))", cmd), cmd
+
+
+def test_clear_cache_is_quoted_per_user_and_only_ok_when_rm_ran():
+    c = Ctx(responses={"d=/data/user/": "cleared\n"})
+    r = _act(c, "clear-cache")
+    assert r["ok"] and r["output"] == "cleared"
+    cmd, su = c.adb.cmds[-1]
+    assert su and cmd.startswith("d=/data/user/0/com.x; [ -w \"$d\" ] && rm -rf \"$d\"/cache/* ")
+    assert "&& echo cleared ||" in cmd and "2>/dev/null" not in cmd
+    # the rm did not run (no root / no data dir): the fallback is an error marker
+    c = Ctx(responses={"d=/data/user/": "Error: cache not cleared (no data dir for user 0, or no root)\n"})
+    r = _act(c, "clear-cache")
+    assert r["ok"] is False and "not cleared" in r["output"]
+    assert c.events[-1].severity == SEV_WARN
+
+
+@pytest.mark.parametrize("pkg", ["com.victim\n", "com.victim\r\n", "com.a\ncom.b"])
+def test_trailing_newline_never_reaches_the_device(pkg):
+    c = Ctx()
+    r = run_action(c, "clear-cache", {"package": pkg})
+    assert r["ok"] is False and r["output"] == "invalid package name" and c.adb.cmds == []
+    with pytest.raises(appmanager.AdbError, match="invalid package"):
+        appmanager.batch(c, "clear-cache", [pkg])
+    with pytest.raises(appmanager.AdbError, match="invalid package"):
+        appmanager.app_detail(c, pkg)
+    assert c.adb.cmds == [] and c.events == []
+
+
+def test_every_validator_rejects_a_trailing_newline():
+    for rx in (appmanager._PKG, appmanager.PKG_RE, appmanager._PERM, appmanager._OP,
+               appmanager._COMPONENT, appmanager.QUERY_RE, appmanager._DATA_APP_DIR):
+        assert rx.pattern.endswith(r"\Z"), rx.pattern
+    assert appmanager._PKG.match("com.victim") and not appmanager._PKG.match("com.victim\n")
+    assert appmanager._PERM.match("a.B") and not appmanager._PERM.match("a.B\n")
+    assert appmanager._OP.match("CAMERA") and not appmanager._OP.match("CAMERA\n")
+    assert appmanager._COMPONENT.match("com.x/.A") and not appmanager._COMPONENT.match("com.x/.A\n")
+    assert appmanager.QUERY_RE.match("chrome") and not appmanager.QUERY_RE.match("chrome\n")
+    c = Ctx()
+    assert _act(c, "grant", permission="android.permission.CAMERA\n")["ok"] is False
+    assert _act(c, "appop", op="CAMERA\n", mode="ignore")["ok"] is False
+    assert _act(c, "enable-component", component="com.x/.A\n")["ok"] is False
+    assert _act(c, "launch-activity", component="com.x/.A\n")["ok"] is False
+    assert c.adb.cmds == []
+    # _simple() only offers the quoted name: a "{pkg}" template cannot exist
+    import inspect
+    assert "pkg=" not in inspect.getsource(appmanager._simple)
 
 
 def test_deny_dangerous_perms_revokes_only_granted_dangerous():
@@ -345,7 +426,8 @@ def test_ifw_block_activity_and_service_write_rules():
     # the pushed temp file is copied into place as root, world-readable
     write = [cmd for cmd, su in c.adb.cmds if "cp /data/local/tmp/" in cmd and su][-1]
     assert "/data/system/ifw/com.x.xml" in write and "chmod 644" in write and "rm -f /data/local/tmp/" in write
-    assert ("pm disable com.x/com.x.AdActivity", True) in c.adb.cmds
+    assert ("pm disable --user 0 com.x/com.x.AdActivity", True) in c.adb.cmds
+    assert ("cat /data/system/ifw/com.x.xml 2>/dev/null", True) in c.adb.cmds
     # a second rule for a service is merged into the existing file
     c.adb.files["/data/system/ifw/com.x.xml"] = xml.encode()
     _act(c, "ifw-block", component="com.x/com.x.TrackSvc", confirm=True)
@@ -368,14 +450,14 @@ def test_ifw_unknown_component_gets_all_three_and_unblock_removes_file():
     assert r["ok"]
     assert len(c.adb.pushed) == before                     # nothing left: file removed
     assert ("rm -f /data/system/ifw/com.x.xml", True) in c.adb.cmds
-    assert ("pm enable com.x/com.x.Mystery", True) in c.adb.cmds
+    assert ("pm enable --user 0 com.x/com.x.Mystery", True) in c.adb.cmds
 
 
 def test_ifw_provider_uses_pm_disable_only():
     c = Ctx(snaps={"manifests": MANIFEST})
     r = _act(c, "ifw-block", component="com.x/com.x.Prov", confirm=True)
     assert r["ok"] and c.adb.pushed == []
-    assert ("pm disable com.x/com.x.Prov", True) in c.adb.cmds
+    assert ("pm disable --user 0 com.x/com.x.Prov", True) in c.adb.cmds
 
 
 def test_block_trackers_needs_cached_scan():
@@ -399,14 +481,55 @@ def test_block_trackers_needs_cached_scan():
 
 def test_kill_checks_pid_owner():
     c = Ctx()
-    r = _act(c, "kill", pid=3000)
+    r = _act(c, "kill", pid=3000, confirm=True)
     assert r["ok"] is False and "belongs to uid 10235" in r["output"]
     assert not any(cmd.startswith("kill") for cmd in c.shell_cmds())
-    r = _act(c, "kill", pid=4712)
+    r = _act(c, "kill", pid=4712, confirm=True)
     assert r["ok"] and c.adb.cmds[-1] == ("kill -9 4712", True)
-    assert _act(c, "kill", pid=99999)["ok"] is False
-    assert _act(c, "kill", pid="x")["ok"] is False
-    assert _act(c, "kill", pid=1)["ok"] is False             # out of range, never runs
+    assert _act(c, "kill", pid=99999, confirm=True)["ok"] is False
+    assert _act(c, "kill", pid="x", confirm=True)["ok"] is False
+    assert _act(c, "kill", pid=1, confirm=True)["ok"] is False   # out of range, never runs
+    # destructive: the API itself needs confirm, not only the browser dialog
+    r = _act(c, "kill", pid=4712)
+    assert r["ok"] is False and "confirm" in r["output"]
+
+
+SYS_PS = ("PID UID RSS NAME\n"
+          "1234 1000 900000 system_server\n"
+          "2222 1000 8000 android.hardware.sensors@2.0-service\n"
+          "5555 1000 120000 com.android.settings\n"
+          "5556 1000 3000 com.android.settings:remote\n"
+          "600 0 2000 zygote64\n")
+
+
+def _settings_ctx():
+    pm = "package:/s/settings.apk=com.android.settings installer=null uid:1000\n"
+    c = Ctx(responses={"pm list packages": pm, "ps -A": SYS_PS,
+                       "dumpsys package": "Packages:\n  Package [com.android.settings] (x):\n    userId=1000\n"
+                                          "    User 0: installed=true hidden=false suspended=false stopped=false enabled=0\n",
+                       "appops get": ""})
+    return c
+
+
+def test_kill_refuses_core_system_uids_even_for_a_shared_uid_package():
+    c = _settings_ctx()
+    for pid in (1234, 2222, 5555):
+        r = run_action(c, "kill", {"package": "com.android.settings", "pid": pid, "confirm": True})
+        assert r["ok"] is False and "core system" in r["output"], (pid, r)
+    assert not any(cmd.startswith("kill") for cmd in c.shell_cmds())
+    # a plain app uid whose process is (mis)named like the platform is refused too
+    c = Ctx(responses={"ps -A": f"PID UID RSS NAME\n77 {UID} 100 system_server\n78 {UID} 100 zygote\n"})
+    for pid in (77, 78):
+        assert _act(c, "kill", pid=pid, confirm=True)["ok"] is False
+    assert not any(cmd.startswith("kill") for cmd in c.shell_cmds())
+
+
+def test_detail_does_not_attribute_core_uid_daemons_to_a_shared_uid_package():
+    c = _settings_ctx()
+    d = appmanager.app_detail(c, "com.android.settings")
+    assert d["uid"] == 1000
+    # only processes named after the package, never system_server / the HALs
+    assert d["running"] == {"pids": [5555, 5556], "rss_kb": 123000}
 
 
 def test_compile_modes():
@@ -434,7 +557,12 @@ def test_prefs_set_rewrites_xml_and_fixes_ownership():
     c = Ctx(files={"/data/data/com.x/shared_prefs/com.x_preferences.xml": PREFS})
     r = _act(c, "prefs-set", file="com.x_preferences.xml", key="analytics", type="boolean",
              value=False, confirm=True)
-    assert r["ok"] and r["output"] == "set"
+    assert r["ok"] and r["output"].startswith("set (app force-stopped first")
+    # the app is stopped before the file is read and rewritten, otherwise its
+    # in-memory map would write the old value back on the next commit
+    cmds = c.shell_cmds()
+    stop = cmds.index("am force-stop --user 0 com.x")
+    assert stop < cmds.index("cat /data/data/com.x/shared_prefs/com.x_preferences.xml")
     remote, data = c.adb.pushed[-1]
     assert remote.startswith("/data/local/tmp/sentinel-")
     xml = data.decode()
@@ -445,26 +573,43 @@ def test_prefs_set_rewrites_xml_and_fixes_ownership():
     write = [cmd for cmd, su in c.adb.cmds if "cp /data/local/tmp/" in cmd and su][-1]
     assert "/data/data/com.x/shared_prefs/com.x_preferences.xml" in write
     assert f"chown {UID}:{UID}" in write and "chmod 660" in write and "restorecon" in write
-    assert c.events[-1].kind == "app.action" and c.events[-1].data["params"]["value"] is False
+    # the event keeps the key but never the value (tokens, passwords...)
+    ev = c.events[-1]
+    assert ev.kind == "app.action" and ev.data["params"]["key"] == "analytics"
+    assert ev.data["params"]["value"] == "<redacted>"
 
 
 def test_prefs_set_new_key_and_set_type_and_delete():
-    files = {"/data/data/com.x/shared_prefs/p.xml": PREFS}
+    # user 10 edits its own copy under /data/user/10 (user 0 lives in /data/data)
+    files = {"/data/data/com.x/shared_prefs/p.xml": PREFS,
+             "/data/user/10/com.x/shared_prefs/p.xml": PREFS}
     c = Ctx(files=files)
-    r = _act(c, "prefs-set", file="p.xml", key="tags", type="set", value=["a", "b"], confirm=True)
+    r = _act(c, "prefs-set", file="p.xml", key="tags", type="set", value=["a", "b"], confirm=True, user=10)
     assert r["ok"]
+    assert c.shell_cmds()[0] == "am force-stop --user 10 com.x"
     xml = c.adb.pushed[-1][1].decode()
     assert '<set name="tags"><string>a</string><string>b</string></set>' in xml
     r = _act(c, "prefs-delete", file="p.xml", key="user", confirm=True)
-    assert r["ok"] and r["output"] == "deleted"
+    assert r["ok"] and r["output"].startswith("deleted (app force-stopped first")
+    assert "am force-stop --user 0 com.x" in c.shell_cmds()
     assert 'name="user"' not in c.adb.pushed[-1][1].decode()
     assert _act(c, "prefs-delete", file="p.xml", key="nope", confirm=True)["ok"] is False
+    before = len(c.adb.cmds)
     for bad in ({"file": "../p.xml", "key": "a"}, {"file": "p.xml", "key": "a b"},
                 {"file": "p.txt", "key": "a"}, {"file": "p.xml", "key": "a", "type": "blob"}):
         r = _act(c, "prefs-set", **{"type": "string", "value": "v", "confirm": True, **bad})
         assert r["ok"] is False
     r = _act(c, "prefs-set", file="p.xml", key="big", type="string", value="x" * 4001, confirm=True)
     assert r["ok"] is False and "long" in r["output"]
+    assert _act(c, "prefs-delete", file="p.xml", key="a b", confirm=True)["ok"] is False
+    # a refused request never force-stops the app
+    assert len(c.adb.cmds) == before
+
+
+def test_prefs_delete_missing_key_still_stops_app_but_reports_failure():
+    c = Ctx(files={"/data/data/com.x/shared_prefs/p.xml": PREFS})
+    r = _act(c, "prefs-delete", file="p.xml", key="nope", confirm=True)
+    assert r["ok"] is False and "not found" in r["output"] and c.adb.pushed == []
 
 
 # ---------------- events ----------------
@@ -487,6 +632,38 @@ def test_every_executed_action_emits_app_action_event():
     assert len(c.events) == 2
 
 
+def test_event_params_redact_secret_looking_keys():
+    c = Ctx(responses={"am force-stop": ""})
+    _act(c, "force-stop", value="eyJhbGciOi.SECRET", password="pw", api_token="t", mode="x",
+         client_secret="s", enabled=True)
+    p = c.events[-1].data["params"]
+    assert p == {"value": "<redacted>", "password": "<redacted>", "api_token": "<redacted>",
+                 "mode": "x", "client_secret": "<redacted>", "enabled": True}
+    assert "SECRET" not in str(c.events[-1].data)
+
+
+def test_run_action_drops_the_per_device_memo():
+    gone = False
+
+    def pm(cmd):
+        nonlocal gone
+        if cmd.startswith("pm uninstall"):
+            gone = True
+            return "Success"
+        if cmd.startswith("pm list packages") and "-u" not in cmd.split() and gone:
+            return "package:/data/app/y/base.apk=com.y installer=null uid:10235\n"
+        return PM_LIST if cmd.startswith("pm list packages") else "Success"
+    c = Ctx(responses={"pm ": pm, "appops get": ""})
+    assert appmanager.app_detail(c, PKG)["users_installed"] == [0]
+    assert "installed_by_user" in c.state["_memo"]
+    assert _act(c, "uninstall", confirm=True)["ok"]
+    assert "_memo" not in c.state
+    d = appmanager.app_detail(c, PKG)
+    assert d["users_installed"] == [] and d["state"]["installed"] is True   # dumpsys still says so
+    # a refused action leaves the memo alone
+    assert _act(c, "uninstall")["ok"] is False and "_memo" in c.state
+
+
 # ---------------- batch / one-click ----------------
 
 def test_batch_validation():
@@ -501,6 +678,9 @@ def test_batch_validation():
         appmanager.batch(c, "freeze", [PKG], 0, False, {"method": "hide"})
     with pytest.raises(appmanager.AdbError, match="non-empty"):
         appmanager.batch(c, "force-stop", [])
+    for bad in (["x"], "str", 5, True):
+        with pytest.raises(appmanager.AdbError, match="options must be an object"):
+            appmanager.batch(c, "force-stop", [PKG], 0, True, bad)
     assert c.adb.cmds == []
 
 
@@ -525,28 +705,71 @@ FULL = ("package:/s/android.apk=android uid:1000\n"
         "package:/s/shell.apk=com.android.shell uid:2000\n"
         "package:/s/launcher.apk=com.android.launcher3 uid:10020\n"
         "package:/s/gms.apk=com.google.android.gms uid:10012\n"
+        "package:/s/gsf.apk=com.google.android.gsf uid:10012\n"
+        "package:/s/vending.apk=com.android.vending uid:10030\n"
+        "package:/s/media.apk=com.android.providers.media.module uid:10040\n"
+        "package:/s/contacts.apk=com.android.providers.contacts uid:10041\n"
+        "package:/s/ime.apk=com.google.android.inputmethod.latin uid:10060\n"
+        "package:/d/magisk.apk=com.topjohnwu.magisk uid:10070\n"
+        "package:/s/telecom.apk=com.android.server.telecom uid:1000\n"
+        "package:/s/bt.apk=com.android.bluetooth uid:1002\n"
+        "package:/d/signal.apk=org.thoughtcrime.securesms uid:10090\n"
         "package:/d/a.apk=com.a uid:10101\n"
         "package:/d/b.apk=com.b uid:10102\n"
+        "package:/s/c.apk=com.c uid:10103\n"
         "package:/s/radio.apk=com.android.radio uid:1001\n")
+THIRD = ("package:/d/a.apk=com.a uid:10101\npackage:/d/b.apk=com.b uid:10102\n"
+         "package:/d/magisk.apk=com.topjohnwu.magisk uid:10070\n"
+         "package:/d/signal.apk=org.thoughtcrime.securesms uid:10090\n")
+IME = "com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME\n"
 
 
-def _oneclick_ctx():
+def _oneclick_ctx(android14: bool = True, sms_holder: str = "org.thoughtcrime.securesms"):
     def pm_list(cmd):
-        if "-3" in cmd.split():
-            return "package:/d/a.apk=com.a uid:10101\npackage:/d/b.apk=com.b uid:10102\n"
-        return FULL
+        return THIRD if "-3" in cmd.split() else FULL
 
     def role(cmd):
-        return "com.android.launcher3\n" if cmd.endswith("android.app.role.HOME") else "\n"
+        if not android14:                      # `cmd role get-role-holders` is 14+
+            return "Error: Unknown command: get-role-holders\n"
+        if cmd.endswith("android.app.role.HOME"):
+            return "com.android.launcher3\n"
+        if cmd.endswith("android.app.role.SMS"):
+            return sms_holder + "\n"
+        return "\n"
+
+    def resolve(cmd):
+        if "android.intent.category.HOME" in cmd:
+            return ("  priority=1 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n"
+                    "  com.android.launcher3/.Launcher\n")
+        if "android.intent.action.SENDTO" in cmd:
+            return f"  {sms_holder}/.MainActivity\n"
+        return "No activity found\n"
     return Ctx(responses={"pm list packages": pm_list, "cmd role get-role-holders": role,
-                          "pm query-activities": "", "pm resolve-activity": ""})
+                          "pm query-activities": "", "pm resolve-activity": resolve,
+                          "settings get secure default_input_method": IME})
 
 
 def test_oneclick_package_set_rules():
     c = _oneclick_ctx()
+    # user: third-party apps minus the root manager and the current SMS app
     assert appmanager.oneclick_packages(c, "user") == ["com.a", "com.b"]
-    # all: uid >= 10000 only, minus the core system set and the launcher
-    assert appmanager.oneclick_packages(c, "all") == ["com.a", "com.b", "com.google.android.gms"]
+    # all: uid >= 10000 only, minus the platform set, the providers, Play
+    # services / store, the launcher, the sms holder, the keyboard and Magisk
+    assert appmanager.oneclick_packages(c, "all") == ["com.a", "com.b", "com.c"]
+    assert ("settings get secure default_input_method", False) in c.adb.cmds
+
+
+def test_oneclick_excludes_launcher_and_sms_app_below_android_14():
+    # no role service: the launcher / sms app come from `pm resolve-activity`
+    c = _oneclick_ctx(android14=False)
+    h = appmanager.handlers(c, 0)
+    assert h["roles"]["home"] == [] and h["defaults"]["launcher"] == "com.android.launcher3"
+    assert appmanager.oneclick_packages(c, "all") == ["com.a", "com.b", "com.c"]
+    assert appmanager.oneclick_packages(c, "user") == ["com.a", "com.b"]
+    # a third-party launcher holding HOME is protected in both scopes as well
+    c = _oneclick_ctx(android14=False, sms_holder="com.b")
+    assert "com.b" not in appmanager.oneclick_packages(c, "user")
+    assert "com.b" not in appmanager.oneclick_packages(c, "all")
 
 
 def test_oneclick_runs_batch_and_trim_caches():
@@ -554,8 +777,9 @@ def test_oneclick_runs_batch_and_trim_caches():
     res = appmanager.oneclick(c, "deny-bg-all", False, "all")
     assert res["ok_count"] == 3 and res["fail_count"] == 0 and "3 all app(s)" in res["note"]
     bg = [cmd for cmd in c.shell_cmds() if cmd.startswith("appops set")]
-    assert bg == [f"appops set {p} {op} ignore" for p in ("com.a", "com.b", "com.google.android.gms")
+    assert bg == [f"appops set --user 0 {p} {op} ignore" for p in ("com.a", "com.b", "com.c")
                   for op in ("RUN_IN_BACKGROUND", "RUN_ANY_IN_BACKGROUND")]
+    assert not any("com.google.android.gms" in cmd or "inputmethod" in cmd for cmd in bg)
     with pytest.raises(appmanager.AdbError, match="confirm"):
         appmanager.oneclick(c, "deny-dangerous-ops-all", False, "user")
     with pytest.raises(appmanager.AdbError, match="unknown op"):
@@ -580,11 +804,42 @@ def test_oneclick_block_trackers_skips_unscanned():
 
 # ---------------- detail / controls / history ----------------
 
+APPOPS_GET = ("Uid mode: COARSE_LOCATION: foreground\n"
+              "CAMERA: allow; time=+3m2s211ms ago; duration=+1s500ms\n"
+              "READ_SMS: deny; rejectTime=+2m ago\n"
+              "RECORD_AUDIO: allow; time=+10m ago; rejectTime=+1m ago (running)\n"
+              "RUN_IN_BACKGROUND: ignore\n"
+              "COARSE_LOCATION: allow; time=+5s ago\n")
+
+
+def test_parse_appops_get():
+    rows = {r["op"]: r for r in appmanager.parse_appops_get(APPOPS_GET)}
+    assert rows["CAMERA"] == {"op": "CAMERA", "mode": "allow", "background": False,
+                              "rejected": False, "ago": 182}
+    assert rows["READ_SMS"] == {"op": "READ_SMS", "mode": "deny", "background": False,
+                                "rejected": True, "ago": 120}
+    assert rows["RECORD_AUDIO"]["rejected"] is True and rows["RECORD_AUDIO"]["ago"] == 60
+    assert rows["RUN_IN_BACKGROUND"] == {"op": "RUN_IN_BACKGROUND", "mode": "ignore",
+                                         "background": False, "rejected": False, "ago": None}
+    # the uid-level override rides along with the package entry
+    assert rows["COARSE_LOCATION"]["mode"] == "allow" and rows["COARSE_LOCATION"]["uid_mode"] == "foreground"
+    assert rows["COARSE_LOCATION"]["ago"] == 5
+    assert appmanager.parse_appops_get("No operations.\n") == []
+    assert appmanager.parse_appops_get("Unknown command: com.x\n") == []
+
+
 def test_app_detail_new_fields():
     c = Ctx(responses={"pm list users": "Users:\n\tUserInfo{0:Owner:c13} running\n",
-                       "dumpsys appops": ""})
+                       "appops get": APPOPS_GET})
     c.state["netstats"] = {str(UID): {"wrx": 10, "wtx": 20, "mrx": 30, "mtx": 40}}
     d = appmanager.app_detail(c, PKG)
+    # `dumpsys appops <pkg>` is not a dumpsys argument; `appops get` is
+    assert ("appops get --user 0 com.x", False) in c.adb.cmds
+    assert not any(cmd.startswith("dumpsys appops") for cmd in c.shell_cmds())
+    assert [o["op"] for o in d["appops"]] == ["COARSE_LOCATION", "CAMERA", "READ_SMS",
+                                              "RECORD_AUDIO", "RUN_IN_BACKGROUND"]
+    assert d["appops"][1] == {"op": "CAMERA", "mode": "allow", "background": False,
+                              "rejected": False, "ago": 182}
     assert d["uid"] == UID and d["shared_user"] is None
     assert d["state"] == {"installed": True, "hidden": False, "suspended": True, "stopped": False,
                           "enabled_state": 0, "frozen": "suspended", "user": 0}
@@ -628,6 +883,23 @@ def test_controls_parsing():
     assert r["ssaid"] == "abc123" and r["keystore_files"] == 2
     # the root-only probes ran with su
     assert ("magisk --denylist ls", True) in c.adb.cmds and ("iptables -S OUTPUT", True) in c.adb.cmds
+    # a work profile is named to sensorservice (the owner keeps the plain form)
+    start = len(c.adb.cmds)
+    appmanager.controls(c, PKG, 10)
+    assert "cmd sensorservice get-uid-state com.x --user 10" in c.shell_cmds()[start:]
+
+
+def test_keystore_count_is_null_on_keystore2_devices():
+    # Android 12+ keeps keys in persistent.sqlite: the legacy dir is empty or
+    # gone, so a count of 0 would be a lie
+    c = Ctx(responses={"pm list packages": PM_LIST,
+                       "ls /data/misc/keystore/user_0": "10234_USRPKEY_old\n"})
+    c.device = {"root": True, "sdk": "34"}
+    r = appmanager.controls(c, PKG)
+    assert r["keystore_files"] is None and "keystore2" in r["errors"]["keystore_files"]
+    assert not any(cmd.startswith("ls /data/misc/keystore") for cmd in c.shell_cmds())
+    c.device = {"root": True, "sdk": "30"}
+    assert appmanager.controls(c, PKG)["keystore_files"] == 1
 
 
 def test_controls_survive_failures():
@@ -650,6 +922,22 @@ def test_export_rows_and_render():
     assert md.startswith("| label | package |") and "| A | com.a | 1.2 |" in md
     js = appmanager.render_export(rows, "json")[0]
     assert '"count": 1' in js
+
+
+def test_export_neutralises_spreadsheet_formulas():
+    apps = [{"package": "com.evil", "label": '=HYPERLINK("http://evil.example/x","Click")',
+             "installer": "-2+3", "version_name": "@SUM(1)", "uid": 10123},
+            {"package": "com.tab", "label": "\tcmd", "installer": "+1"},
+            {"package": "com.ok", "label": "Fine - app", "installer": "com.android.vending"}]
+    rows = appmanager.export_rows(apps)
+    csv = appmanager.render_export(rows, "csv")[0].splitlines()
+    assert csv[1] == '"\'=HYPERLINK(""http://evil.example/x"",""Click"")",com.evil,\'@SUM(1),False,True,True,\'-2+3,10123,0,0'
+    assert csv[2].startswith("'\tcmd,com.tab,,") and ",'+1," in csv[2]
+    assert csv[3] == "Fine - app,com.ok,,False,True,True,com.android.vending,,0,0"
+    md = appmanager.render_export(rows, "md")[0]
+    assert "| '=HYPERLINK(" in md and "| '-2+3 |" in md and "| Fine - app |" in md
+    # json is not a spreadsheet: values stay verbatim
+    assert '"=HYPERLINK(' in appmanager.render_export(rows, "json")[0]
 
 
 def test_history_reads_app_action_events():
@@ -793,7 +1081,7 @@ def test_write_device_file_validation():
     with pytest.raises(appmanager.AdbError):
         appdata.write_device_file(c, "/data/ok", b"x", owner="root:root")
     assert c.adb.pushed == []
-    c = Ctx(responses={"(cp": "cp: permission denied"})
+    c = Ctx(responses={"(": "cp: permission denied"})       # the whole (cp && ...) step fails
     with pytest.raises(appmanager.AdbError, match="write failed"):
         appdata.write_device_file(c, "/data/ok", b"x")
     # the parent is only created on request (system dirs), never for app dirs
@@ -927,8 +1215,10 @@ def test_restore_job_flow(tmp_path):
     remote, data = c.adb.pushed[0]
     assert remote.startswith("/data/local/tmp/sentinel-") and remote.endswith(".tar") and data == b"T" * 100
     su_cmds = [cmd for cmd, su in c.adb.cmds if su]
-    assert any(f"tar -xf {remote} -C /data/data && chown -R {UID}:{UID} /data/data/com.x "
-               "&& restorecon -R /data/data/com.x" in cmd for cmd in su_cmds)
+    # unpacked as root, then ownership and SELinux labels handed back to the app
+    assert any(f"tar -xf {remote} -C /data/data" in cmd and f"chown -R {UID}:{UID} /data/data/com.x" in cmd
+               and "restorecon -R" in cmd and "/data/data/com.x" in cmd.split("restorecon -R", 1)[1]
+               for cmd in su_cmds)
     assert ("am force-stop com.x", False) in c.adb.cmds and (f"rm -f {remote}", False) in c.adb.cmds
     assert not any("pm clear" in cmd for cmd, _ in c.adb.cmds)
     kinds = [e.title for e in c.events]

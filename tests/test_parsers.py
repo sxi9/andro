@@ -503,3 +503,64 @@ def test_appmanager_action_validation():
     # bad appop mode rejected
     r = appmanager.run_action(c, "appop", {"package": "com.x", "op": "CAMERA", "mode": "evil"})
     assert r["ok"] is False
+
+
+def test_appmanager_users_and_uninstalled_listing():
+    from sentinel.service import appmanager
+
+    class FakeAdb:
+        def __init__(self):
+            self.cmds = []
+        def shell_sync(self, cmd, su=False, timeout=60):
+            self.cmds.append(cmd)
+            if cmd.startswith("pm list users"):
+                return ("Users:\n\tUserInfo{0:Owner:c13} running\n"
+                        "\tUserInfo{10:Work profile:1030} running\n")
+            if "pm list packages" in cmd:
+                rows = ["package:/p/a.apk=com.a installer=null uid:10001"]
+                if "-u" in cmd.split():
+                    rows.append("package:/p/chrome.apk=com.android.chrome installer=null uid:10131")
+                if "-s" in cmd.split():
+                    return "package:/s/x.apk=com.android.chrome\n"
+                if "-d" in cmd.split():
+                    return ""
+                return "\n".join(rows) + "\n"
+            return ""
+
+    class Ctx:
+        def __init__(self):
+            self.adb = FakeAdb(); self.state = {}
+            class S:
+                def get_snapshot(self, k): return None
+            self.store = S()
+
+    c = Ctx()
+    users = appmanager.list_users(c.adb)
+    assert [u["id"] for u in users] == [0, 10] and users[1]["name"] == "Work profile"
+    res = appmanager.list_apps(c, "all", user=0, include_uninstalled=True)
+    by = {a["package"]: a for a in res["apps"]}
+    assert by["com.a"]["installed"] is True
+    # chrome shows up only with -u => it was uninstalled for this user
+    assert by["com.android.chrome"]["installed"] is False
+    assert by["com.android.chrome"]["label"] == "Chrome"
+    assert res["uninstalled"] == 1 and res["count"] == 2
+    assert any("--user 0" in x for x in c.adb.cmds)
+    only = appmanager.list_apps(c, "uninstalled", user=0)
+    assert [a["package"] for a in only["apps"]] == ["com.android.chrome"]
+
+
+def test_appmanager_reinstall_and_user_scoping():
+    from sentinel.service import appmanager
+
+    class FakeAdb:
+        last = None
+        def shell_sync(self, cmd, su=False, timeout=60): self.last = cmd; return "Success"
+    class Ctx:
+        def __init__(self): self.adb = FakeAdb(); self.state = {}
+    c = Ctx()
+    r = appmanager.run_action(c, "reinstall", {"package": "com.android.chrome", "user": 10})
+    assert r["ok"] and c.adb.last == "pm install-existing --user 10 com.android.chrome"
+    r = appmanager.run_action(c, "uninstall", {"package": "com.x", "user": 10, "confirm": True})
+    assert "--user 10" in c.adb.last
+    r = appmanager.run_action(c, "uninstall", {"package": "com.x", "user": "9999", "confirm": True})
+    assert r["ok"] is False and "user" in r["output"]

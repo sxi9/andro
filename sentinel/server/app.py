@@ -582,7 +582,8 @@ def create_app(cfg: Config) -> FastAPI:
 
     # ---------- app manager ----------
     @app.get("/api/appmanager/list")
-    async def am_list(which: str = "all", device: str | None = None):
+    async def am_list(which: str = "all", device: str | None = None,
+                      user: int | None = None, uninstalled: int = 1):
         dctx = _dev(device)
         if dctx is None or dctx.adb is None:
             from ..enrich.labels import BUILTIN_LABELS, label_for
@@ -590,10 +591,17 @@ def create_app(cfg: Config) -> FastAPI:
             for a in apps:
                 a["label"] = label_for(a["package"])
                 a["label_source"] = "known" if a["package"] in BUILTIN_LABELS else "guess"
+                a["installed"] = a["package"] != "com.android.chrome"  # one debloated example
+            if which == "uninstalled":
+                apps = [a for a in apps if not a["installed"]]
             return {"demo": True, "apps": apps, "count": len(apps), "flags": "demo",
+                    "users": [{"id": 0, "name": "Owner", "running": True},
+                              {"id": 10, "name": "Work profile", "running": True}],
+                    "user": user, "uninstalled": sum(1 for a in apps if not a["installed"]),
                     "labels_resolved": 0}
         from ..service import appmanager
-        return await asyncio.to_thread(appmanager.list_apps, dctx, which)
+        return await asyncio.to_thread(appmanager.list_apps, dctx, which, user,
+                                       bool(uninstalled))
 
     @app.post("/api/appmanager/resolve-labels")
     async def am_resolve_labels(body: dict | None = None):

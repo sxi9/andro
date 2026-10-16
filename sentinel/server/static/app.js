@@ -810,20 +810,40 @@
   })();
 
   /* ================= app manager ================= */
-  var amApps = [], amWhich = "all", amSel = null, amMeta = {};
+  var amApps = [], amWhich = "all", amSel = null, amMeta = {}, amUser = null, amRows = {};
   function loadAppManager(quiet) {
     if (!quiet) $("#am-applist").innerHTML = '<div class="empty">loading apps…</div>';
-    fetch(dq("/api/appmanager/list?which=" + amWhich)).then(function (r) { return r.json(); })
+    var url = "/api/appmanager/list?which=" + amWhich + (amUser != null ? "&user=" + amUser : "");
+    fetch(dq(url)).then(function (r) { return r.json(); })
       .then(function (d) {
         amApps = d.apps || []; amMeta = d;
+        amRows = {};
+        amApps.forEach(function (a) { amRows[a.package] = a; });
+        // user / profile picker (only shown when the device has more than one)
+        var us = $("#am-user");
+        if (us && d.users) {
+          us.innerHTML = d.users.map(function (u) {
+            return '<option value="' + u.id + '">' + esc(u.name) + " (user " + u.id + ")" +
+              (u.running ? "" : " · stopped") + "</option>";
+          }).join("");
+          us.style.display = d.users.length > 1 ? "" : "none";
+          if (amUser == null && d.users.length) amUser = d.users[0].id;
+          us.value = String(amUser);
+        }
         var c = $("#am-count");
         if (c) c.textContent = d.error ? ("⚠ " + d.error) :
-          (d.count + " apps" + (d.labels_resolved ? " · " + d.labels_resolved + " real names from APKs" : "") +
+          (d.count + " apps" +
+           (d.uninstalled ? " · " + d.uninstalled + " uninstalled for this user" : "") +
+           (d.labels_resolved ? " · " + d.labels_resolved + " real names from APKs" : "") +
            (d.flags && d.flags !== "demo" ? " · pm " + d.flags : ""));
         renderAmList();
       })
       .catch(function () { $("#am-applist").innerHTML = '<div class="empty">could not load apps</div>'; });
   }
+  $("#am-user").addEventListener("change", function () {
+    amUser = parseInt(this.value, 10);
+    loadAppManager();
+  });
   function renderAmList() {
     var q = ($("#am-search").value || "").toLowerCase();
     var rows = amApps.filter(function (a) {
@@ -838,7 +858,8 @@
         '<div class="ai"' + (a.system ? ' style="background:var(--fg-mut)"' : "") + ">" + esc(init) + "</div>" +
         '<div class="am-meta"><div class="am-nm">' + esc(name) +
         (a.system ? ' <span class="pill mut">system</span>' : "") +
-        (!a.enabled ? ' <span class="pill warn">disabled</span>' : "") +
+        (a.installed === false ? ' <span class="pill crit" title="Removed for this user (debloated); still on the device">not installed</span>' : "") +
+        (!a.enabled && a.installed !== false ? ' <span class="pill warn">disabled</span>' : "") +
         (a.godmode ? ' <span class="pill crit">god-mode</span>' : "") + "</div>" +
         '<div class="am-pk">' + esc(a.package) + "</div></div>" +
         (a.data_size ? '<span class="fsz">' + fmtBytes(a.data_size) + "</span>" : "") + "</div>";
@@ -897,7 +918,8 @@
     if (destructive && typeof confirm === "function" &&
         !confirm("This will " + action.replace("-", " ") + " " +
           shortApp(params.package) + " on the device. Continue?")) return;
-    var body = Object.assign({ device: DEV, confirm: destructive }, params, { action: action });
+    var body = Object.assign({ device: DEV, confirm: destructive, user: amUser == null ? 0 : amUser },
+                             params, { action: action });
     fetch("/api/appmanager/action", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -931,7 +953,12 @@
       "</dl></div>";
 
     var ap = ' data-pkg="' + esc(pkg) + '"';
+    var row = amRows[pkg] || {};
     var actions = '<div class="am-actions">' +
+      (row.installed === false
+        ? '<button class="btn p" data-act="reinstall"' + ap +
+          ' title="Reinstall for this user from the copy still on the device">Reinstall</button>'
+        : "") +
       (det.enabled
         ? '<button class="btn danger" data-act="disable"' + ap + ">Disable</button>"
         : '<button class="btn" data-act="enable"' + ap + ">Enable</button>") +

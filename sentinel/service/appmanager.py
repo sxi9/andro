@@ -33,39 +33,67 @@ def _vpkg(pkg: str) -> str:
     return pkg
 
 
-def _pm_list(adb, flag: str) -> tuple[dict, str]:
+_USER_LINE = re.compile(r"UserInfo\{(\d+):([^:}]*):")
+
+
+def list_users(adb) -> list[dict]:
+    """Android users / profiles on the device: [{id, name, running}]."""
+    try:
+        out = adb.shell_sync("pm list users", timeout=15)
+    except AdbError:
+        return [{"id": 0, "name": "Owner", "running": True}]
+    users = []
+    for line in out.splitlines():
+        m = _USER_LINE.search(line)
+        if m:
+            users.append({"id": int(m.group(1)), "name": m.group(2).strip() or f"user {m.group(1)}",
+                          "running": "running" in line})
+    return users or [{"id": 0, "name": "Owner", "running": True}]
+
+
+def _pm_list(adb, flag: str, user: int | None = None, uninstalled: bool = False) -> tuple[dict, str]:
     """`pm list packages` with graceful fallbacks: some builds reject -i or -U.
-    Returns (parsed, flags_used)."""
+    Returns (parsed, flags_used). `uninstalled` adds -u (packages removed for
+    this user with `pm uninstall --user` but still on the device)."""
+    scope = (f"--user {int(user)} " if user is not None else "") + ("-u " if uninstalled else "")
     attempts = [f"-f -i -U {flag}", f"-f -U {flag}", f"-f {flag}", flag, ""]
     for fl in attempts:
-        cmd = ("pm list packages " + fl).strip()
+        cmd = ("pm list packages " + scope + fl).strip()
         try:
             out = adb.shell_sync(cmd, timeout=60)
         except AdbError:
             continue
         parsed = parse_pm_list(out)
         if parsed:
-            return parsed, fl.strip()
+            return parsed, (scope + fl).strip()
     return {}, ""
 
 
-def list_apps(dctx, which: str = "all") -> dict:
-    """Every installed package (system + user). which: all|user|system|disabled|enabled.
-    Returns {apps: [...], count, flags, labels_resolved, error?}."""
+def list_apps(dctx, which: str = "all", user: int | None = None,
+              include_uninstalled: bool = True) -> dict:
+    """Every package on the device for one user, incl. ones uninstalled for
+    that user (debloated) when include_uninstalled.
+    which: all|user|system|disabled|enabled|uninstalled."""
     from ..enrich.labels import BUILTIN_LABELS, label_for
     adb = dctx.adb
-    flag = {"all": "", "user": "-3", "system": "-s",
-            "disabled": "-d", "enabled": "-e"}.get(which, "")
-    base, used = _pm_list(adb, flag)
+    flag = {"all": "", "user": "-3", "system": "-s", "disabled": "-d",
+            "enabled": "-e", "uninstalled": ""}.get(which, "")
+    want_uninst = include_uninstalled or which == "uninstalled"
+    base, used = _pm_list(adb, flag, user, uninstalled=want_uninst)
     if not base:
-        return {"apps": [], "count": 0, "flags": used,
+        return {"apps": [], "count": 0, "flags": used, "users": list_users(adb),
                 "error": "pm list packages returned nothing - is the device authorized?"}
+    installed: set[str] | None = None
+    if want_uninst:
+        inst, _ = _pm_list(adb, flag, user, uninstalled=False)
+        installed = set(inst)
+    uflag = f"--user {int(user)} " if user is not None else ""
     try:
-        disabled = set(parse_pm_list(adb.shell_sync("pm list packages -d", timeout=20)))
+        disabled = set(parse_pm_list(adb.shell_sync(f"pm list packages {uflag}-d", timeout=20)))
     except AdbError:
         disabled = set()
     try:
-        system = set(parse_pm_list(adb.shell_sync("pm list packages -s", timeout=20)))
+        system = set(parse_pm_list(adb.shell_sync(f"pm list packages {uflag}-s -u", timeout=20)))
     except AdbError:
         system = set()
     sizes = (dctx.state.get("storage") or {}).get("apps") or {}
@@ -74,6 +102,9 @@ def list_apps(dctx, which: str = "all") -> dict:
     labels: dict[str, str] = dctx.store.get_snapshot("labels") or {}
     out = []
     for pkg, b in base.items():
+        is_installed = True if installed is None else (pkg in installed)
+        if which == "uninstalled" and is_installed:
+            continue
         szd = sizes.get(pkg, {})
         out.append({
             "package": pkg,
@@ -81,6 +112,7 @@ def list_apps(dctx, which: str = "all") -> dict:
             "label_source": "apk" if pkg in labels else ("known" if pkg in BUILTIN_LABELS else "guess"),
             "system": pkg in system,
             "enabled": pkg not in disabled,
+            "installed": is_installed,
             "installer": b.get("installer"),
             "uid": b.get("uid"),
             "data_size": szd.get("data", 0),
@@ -88,7 +120,9 @@ def list_apps(dctx, which: str = "all") -> dict:
             "godmode": pkg in god_pkgs,
         })
     out.sort(key=lambda a: (a["label"].lower(), a["package"]))
-    return {"apps": out, "count": len(out), "flags": used,
+    return {"apps": out, "count": len(out), "flags": used, "user": user,
+            "users": list_users(adb),
+            "uninstalled": sum(1 for a in out if not a["installed"]),
             "labels_resolved": sum(1 for a in out if a["label_source"] == "apk")}
 
 
@@ -141,21 +175,31 @@ def _run_action(dctx, action: str, params: dict) -> dict:
     if action in DESTRUCTIVE and not p.get("confirm"):
         return {"ok": False, "output": "destructive action requires confirm=true",
                 "action": action}
+    try:
+        user = int(p.get("user", 0) or 0)
+    except (TypeError, ValueError):
+        user = 0
+    if not 0 <= user <= 999:
+        return {"ok": False, "output": "invalid user id", "action": action}
 
     if action == "enable":
-        cmd = f"pm enable {shlex.quote(_vpkg(pkg))}"
+        cmd = f"pm enable --user {user} {shlex.quote(_vpkg(pkg))}"
     elif action == "disable":
-        cmd = f"pm disable-user --user 0 {shlex.quote(_vpkg(pkg))}"
+        cmd = f"pm disable-user --user {user} {shlex.quote(_vpkg(pkg))}"
     elif action == "force-stop":
         cmd = f"am force-stop {shlex.quote(_vpkg(pkg))}"
     elif action == "clear-data":
-        cmd = f"pm clear {shlex.quote(_vpkg(pkg))}"
+        cmd = f"pm clear --user {user} {shlex.quote(_vpkg(pkg))}"
     elif action == "clear-cache":
         _vpkg(pkg)
         cmd = (f"rm -rf /data/data/{pkg}/cache/* /data/data/{pkg}/code_cache/* "
                f"2>/dev/null; echo cleared")
     elif action == "uninstall":
-        cmd = f"pm uninstall --user 0 {shlex.quote(_vpkg(pkg))}"
+        cmd = f"pm uninstall --user {user} {shlex.quote(_vpkg(pkg))}"
+    elif action == "reinstall":
+        # bring back an app that was removed for this user (the usual debloat),
+        # using the copy still on the device - no download needed
+        cmd = f"pm install-existing --user {user} {shlex.quote(_vpkg(pkg))}"
     elif action in ("grant", "revoke"):
         perm = p.get("permission", "")
         if not _PERM.match(perm):

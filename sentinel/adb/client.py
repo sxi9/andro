@@ -249,6 +249,18 @@ class AdbClient:
         cmd = f"find {shlex.quote(root)} -type f {pred} 2>/dev/null | head -n {int(limit)}"
         return self.shell_sync(cmd, su=su, timeout=timeout)
 
+    def exec_out_bytes(self, cmd: str, *, su: bool = False, timeout: float = 120.0) -> bytes:
+        """Run a command via exec-out and return its raw stdout bytes (no CRLF
+        mangling). Used for byte-range reads of device files."""
+        full = self._base() + ["exec-out", self._device_cmd(cmd, su)]
+        try:
+            p = subprocess.run(full, capture_output=True, timeout=timeout)
+        except FileNotFoundError as e:
+            raise AdbError(f"adb binary not found: {self.adb_path}") from e
+        except subprocess.TimeoutExpired as e:
+            raise AdbError("adb exec-out timed out") from e
+        return p.stdout or b""
+
     # ---- file transfer ----
     def pull_file(self, remote: str, local, *, timeout: float = 600.0) -> bool:
         """`adb pull` for a world-readable file (APKs). Returns True on success."""

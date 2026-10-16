@@ -33,12 +33,33 @@ def _vpkg(pkg: str) -> str:
     return pkg
 
 
-def list_apps(dctx, which: str = "all") -> list[dict]:
-    """Every installed package (system + user). which: all|user|system|disabled|enabled."""
+def _pm_list(adb, flag: str) -> tuple[dict, str]:
+    """`pm list packages` with graceful fallbacks: some builds reject -i or -U.
+    Returns (parsed, flags_used)."""
+    attempts = [f"-f -i -U {flag}", f"-f -U {flag}", f"-f {flag}", flag, ""]
+    for fl in attempts:
+        cmd = ("pm list packages " + fl).strip()
+        try:
+            out = adb.shell_sync(cmd, timeout=60)
+        except AdbError:
+            continue
+        parsed = parse_pm_list(out)
+        if parsed:
+            return parsed, fl.strip()
+    return {}, ""
+
+
+def list_apps(dctx, which: str = "all") -> dict:
+    """Every installed package (system + user). which: all|user|system|disabled|enabled.
+    Returns {apps: [...], count, flags, labels_resolved, error?}."""
+    from ..enrich.labels import BUILTIN_LABELS, label_for
     adb = dctx.adb
     flag = {"all": "", "user": "-3", "system": "-s",
             "disabled": "-d", "enabled": "-e"}.get(which, "")
-    base = parse_pm_list(adb.shell_sync(f"pm list packages -f -i -U {flag}".strip(), timeout=40))
+    base, used = _pm_list(adb, flag)
+    if not base:
+        return {"apps": [], "count": 0, "flags": used,
+                "error": "pm list packages returned nothing - is the device authorized?"}
     try:
         disabled = set(parse_pm_list(adb.shell_sync("pm list packages -d", timeout=20)))
     except AdbError:
@@ -50,11 +71,14 @@ def list_apps(dctx, which: str = "all") -> list[dict]:
     sizes = (dctx.state.get("storage") or {}).get("apps") or {}
     god = dctx.state.get("godmode") or {}
     god_pkgs = {p for pkgs in god.values() for p in pkgs}
+    labels: dict[str, str] = dctx.store.get_snapshot("labels") or {}
     out = []
     for pkg, b in base.items():
         szd = sizes.get(pkg, {})
         out.append({
             "package": pkg,
+            "label": label_for(pkg, labels),
+            "label_source": "apk" if pkg in labels else ("known" if pkg in BUILTIN_LABELS else "guess"),
             "system": pkg in system,
             "enabled": pkg not in disabled,
             "installer": b.get("installer"),
@@ -63,8 +87,9 @@ def list_apps(dctx, which: str = "all") -> list[dict]:
             "apk_size": szd.get("app", 0),
             "godmode": pkg in god_pkgs,
         })
-    out.sort(key=lambda a: a["package"])
-    return out
+    out.sort(key=lambda a: (a["label"].lower(), a["package"]))
+    return {"apps": out, "count": len(out), "flags": used,
+            "labels_resolved": sum(1 for a in out if a["label_source"] == "apk")}
 
 
 def app_detail(dctx, pkg: str) -> dict:

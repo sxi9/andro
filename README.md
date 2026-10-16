@@ -214,3 +214,32 @@ device adb sees with its exact state and what to do:
 The dashboard is local-only: Host validation blocks DNS rebinding, the
 WebSocket checks Origin, and every state-changing request (ADB controls,
 backups, exports) is refused if it carries a cross-site Origin.
+
+## App Manager
+
+The **App Manager** tab (inspired by [App Manager](https://github.com/muntashirakon/AppManager))
+lists **every** package, system and user, not just third-party ones. Chrome,
+Google Photos, Samsung and Google system apps all appear here. Filter by
+user/system/disabled, search by name or package, and click an app for:
+
+- identity: version, target/min SDK, ABI, installer, install and update
+  times, data directory, signing certificate, enabled state
+- declared vs granted permissions, each with grant/revoke
+- app-ops activity, component override state, god-mode access
+- owner actions: enable/disable, force-stop, clear cache, clear data,
+  uninstall, set an app op, enable/disable a component. Destructive ones
+  ask for confirmation. Every argument is validated and shell-quoted.
+
+### Real app names
+
+Package names are shown with a readable name from a built-in map of ~150
+common apps, or a guess from the package name. For the real label of every
+app, press **Resolve names**: Sentinel reads each APK's `AndroidManifest.xml`
+and `resources.arsc` by byte range over adb (a few hundred KB per app, never
+the whole APK) and decodes them with the optional parser:
+
+```bash
+pip install pyaxmlparser        # or: pip install -e .[labels]
+```
+
+Names are cached per device, so this runs once.

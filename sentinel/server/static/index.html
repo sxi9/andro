@@ -163,7 +163,7 @@
           <div class="card tile" data-tip="Installed from outside a trusted store. Not bad by itself, but it is how stalkerware usually arrives."><div class="k">Sideloaded</div><div class="v tnum" id="t-side">0</div><div class="d">not from Play</div></div>
         </div>
         <div class="card pad0" style="margin-top:14px">
-          <div class="ch"><h3>Installed apps</h3><span class="tiphint" data-tip="Every third-party app with its risk score (0-100), install source, dangerous permissions and data use. Click an app to inspect where it stores its files. The score blends god-mode access, dangerous permissions, sideloading and cellular egress.">?</span><span class="hint">click an app to inspect it</span></div>
+          <div class="ch"><h3>Third-party apps</h3><span class="tiphint" data-tip="Apps installed on top of the system image, with a risk score (0-100), install source, dangerous permissions and data use. Preinstalled apps such as Chrome or Google Photos are NOT here: open App Manager to see every app. The score blends god-mode access, dangerous permissions, sideloading and cellular egress.">?</span><span class="hint">risk view · for every app incl. system ones use App Manager</span></div>
           <div class="toolbar">
             <input id="appsearch" type="search" placeholder="Filter by name, package or permission…" autocomplete="off">
             <select id="appsort" aria-label="Sort apps">
@@ -237,7 +237,11 @@
                 <button data-which="disabled">disabled</button>
               </div>
             </div>
-            <div class="toolbar"><input id="am-search" type="search" placeholder="Search apps…" autocomplete="off"></div>
+            <div class="toolbar">
+              <input id="am-search" type="search" placeholder="Search by name or package…" autocomplete="off">
+              <button class="btn" id="am-resolve" title="Read each app's real name from its APK (manifest + resources only, fast). Needs pip install pyaxmlparser on this computer.">Resolve names</button>
+            </div>
+            <div id="am-count" class="hint" style="padding:6px 15px;border-bottom:1px solid var(--border-soft)"></div>
             <div class="applist" id="am-applist" style="max-height:620px"><div class="empty">loading apps…</div></div>
           </div>
           <div class="card pad0 am-detail" id="am-detail">

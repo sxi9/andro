@@ -810,23 +810,33 @@
   })();
 
   /* ================= app manager ================= */
-  var amApps = [], amWhich = "all", amSel = null;
-  function loadAppManager() {
-    $("#am-applist").innerHTML = '<div class="empty">loading apps…</div>';
+  var amApps = [], amWhich = "all", amSel = null, amMeta = {};
+  function loadAppManager(quiet) {
+    if (!quiet) $("#am-applist").innerHTML = '<div class="empty">loading apps…</div>';
     fetch(dq("/api/appmanager/list?which=" + amWhich)).then(function (r) { return r.json(); })
-      .then(function (d) { amApps = d.apps || []; renderAmList(); })
+      .then(function (d) {
+        amApps = d.apps || []; amMeta = d;
+        var c = $("#am-count");
+        if (c) c.textContent = d.error ? ("⚠ " + d.error) :
+          (d.count + " apps" + (d.labels_resolved ? " · " + d.labels_resolved + " real names from APKs" : "") +
+           (d.flags && d.flags !== "demo" ? " · pm " + d.flags : ""));
+        renderAmList();
+      })
       .catch(function () { $("#am-applist").innerHTML = '<div class="empty">could not load apps</div>'; });
   }
   function renderAmList() {
     var q = ($("#am-search").value || "").toLowerCase();
     var rows = amApps.filter(function (a) {
-      return !q || a.package.toLowerCase().indexOf(q) >= 0;
+      if (!q) return true;
+      return a.package.toLowerCase().indexOf(q) >= 0 ||
+        (a.label || "").toLowerCase().indexOf(q) >= 0;
     });
     $("#am-applist").innerHTML = rows.map(function (a) {
-      var init = shortApp(a.package).slice(0, 2).toUpperCase();
+      var name = a.label || shortApp(a.package);
+      var init = name.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "?";
       return '<div class="am-row" data-pkg="' + esc(a.package) + '">' +
         '<div class="ai"' + (a.system ? ' style="background:var(--fg-mut)"' : "") + ">" + esc(init) + "</div>" +
-        '<div class="am-meta"><div class="am-nm">' + esc(shortApp(a.package)) +
+        '<div class="am-meta"><div class="am-nm">' + esc(name) +
         (a.system ? ' <span class="pill mut">system</span>' : "") +
         (!a.enabled ? ' <span class="pill warn">disabled</span>' : "") +
         (a.godmode ? ' <span class="pill crit">god-mode</span>' : "") + "</div>" +
@@ -847,6 +857,21 @@
     applyGlobalSearch();
   }
   $("#am-search").addEventListener("input", renderAmList);
+  $("#am-resolve").addEventListener("click", function () {
+    toast("Resolving app names from APK resources…", "", "this reads only the manifest and resources of each APK");
+    fetch("/api/appmanager/resolve-labels", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device: DEV }),
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      if (res.ok === false) { toast(res.error || "could not start", "warn"); return; }
+      toast("Resolving " + res.packages + " app names", "good");
+      var ticks = 0;
+      var iv = setInterval(function () {
+        if (currentTab === "appmgr") loadAppManager(true);
+        if (++ticks > 45) clearInterval(iv);
+      }, 4000);
+    }).catch(function () { toast("request failed", "crit"); });
+  });
   $$("#am-filter button").forEach(function (b) {
     b.addEventListener("click", function () {
       $$("#am-filter button").forEach(function (x) { x.classList.remove("on"); });

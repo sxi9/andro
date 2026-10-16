@@ -585,9 +585,44 @@ def create_app(cfg: Config) -> FastAPI:
     async def am_list(which: str = "all", device: str | None = None):
         dctx = _dev(device)
         if dctx is None or dctx.adb is None:
-            return {"demo": True, "apps": _demo_app_list()}
+            from ..enrich.labels import BUILTIN_LABELS, label_for
+            apps = _demo_app_list()
+            for a in apps:
+                a["label"] = label_for(a["package"])
+                a["label_source"] = "known" if a["package"] in BUILTIN_LABELS else "guess"
+            return {"demo": True, "apps": apps, "count": len(apps), "flags": "demo",
+                    "labels_resolved": 0}
         from ..service import appmanager
-        return {"apps": await asyncio.to_thread(appmanager.list_apps, dctx, which)}
+        return await asyncio.to_thread(appmanager.list_apps, dctx, which)
+
+    @app.post("/api/appmanager/resolve-labels")
+    async def am_resolve_labels(body: dict | None = None):
+        """Extract real app names from each APK's resources (manifest +
+        resources.arsc fetched by byte range, never the whole APK)."""
+        body = body or {}
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return JSONResponse({"ok": False, "error": "needs a real device"}, status_code=400)
+        try:
+            import pyaxmlparser  # noqa: F401
+        except ImportError:
+            return JSONResponse({"ok": False, "error": "install the optional parser: "
+                                 "pip install pyaxmlparser"}, status_code=400)
+        from ..enrich.labels import resolve_labels
+        from ..service import appmanager
+        data = await asyncio.to_thread(appmanager.list_apps, dctx, "all")
+        pkgs = [a["package"] for a in data.get("apps", []) if a.get("label_source") != "apk"]
+
+        def progress(i: int, n: int) -> None:
+            dctx.emit_threadsafe(Event(kind="log.line", severity=SEV_INFO,
+                                       title="resolving app names", detail=f"{i}/{n}",
+                                       data={"level": "I", "tag": "sentinel", "buffer": "sys",
+                                             "labels": True, "done": i, "total": n}))
+
+        task = asyncio.create_task(asyncio.to_thread(resolve_labels, dctx, pkgs, progress))
+        dctx.tasks.append(task)
+        task.add_done_callback(lambda t: t in dctx.tasks and dctx.tasks.remove(t))
+        return {"ok": True, "started": True, "packages": len(pkgs)}
 
     @app.get("/api/appmanager/app/{pkg}")
     async def am_detail(pkg: str, device: str | None = None):

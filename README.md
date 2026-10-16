@@ -232,14 +232,15 @@ user/system/disabled, search by name or package, and click an app for:
 
 ### Real app names
 
-Package names are shown with a readable name from a built-in map of ~150
-common apps, or a guess from the package name. For the real label of every
-app, press **Resolve names**: Sentinel reads each APK's `AndroidManifest.xml`
-and `resources.arsc` by byte range over adb (a few hundred KB per app, never
-the whole APK) and decodes them with the optional parser:
+Package names are shown with a readable name from a built-in map of ~180
+common apps, or a guess from the package name (hash-like segments and
+`_v2` suffixes are skipped). For the real label of every app Sentinel reads
+each APK's `AndroidManifest.xml` and `resources.arsc` by byte range over adb
+(a few hundred KB per app, never the whole APK) and decodes them with
+`pyaxmlparser`, which the installers now set up from `requirements.txt`.
+This runs automatically the first time the App Manager opens on a device;
+**Resolve names** re-runs it for anything still guessed.
 
-```bash
-pip install pyaxmlparser        # or: pip install -e .[labels]
-```
-
-Names are cached per device, so this runs once.
+WebAPKs ("Web app" shortcuts a Chromium browser creates for a PWA, packages
+like `org.chromium.webapk.<hash>`) get their real PWA name plus the start URL,
+scope and host browser from their manifest. Names are cached per device.

@@ -1,4 +1,6 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
+# real app names + WebAPK facts, read from each APK's manifest/resources
+pyaxmlparser>=0.3.27
 # optional: offline GeoIP enrichment (pair with GeoLite2 .mmdb files)
 # geoip2>=4.8

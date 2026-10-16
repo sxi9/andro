@@ -33,6 +33,7 @@
     else if (currentTab === "logs") renderLogs();
     else if (currentTab === "radio") renderRadioLog();
     else if (currentTab === "network") { renderFlow(); renderDestTable(); }
+    else if (currentTab === "appmgr") loadAppManager();
   }
 
   /* ---------- theme ---------- */
@@ -811,8 +812,22 @@
 
   /* ================= app manager ================= */
   var amApps = [], amWhich = "all", amSel = null, amMeta = {}, amUser = null, amRows = {};
+  var amDev = DEV, amPending = null;  // device the list belongs to; package to open after a reload
+  var amHandlers = null, amHandlersKey = "";  // "Defaults on this device", cached per device + user
+  var amAutoDone = {}, amResolveIv = null;
+  function amUserLabel() {
+    if (amUser === "all") return "all users";
+    var id = amUser == null ? 0 : amUser, name = "";
+    (amMeta.users || []).forEach(function (u) { if (u.id === id) name = u.name; });
+    return "user " + id + (name ? " (" + name + ")" : "");
+  }
   function loadAppManager(quiet) {
-    if (!quiet) $("#am-applist").innerHTML = '<div class="empty">loading apps…</div>';
+    if (amDev !== DEV) {  // device switched: user ids and the selection belong to the old one
+      amDev = DEV; amUser = null; amSel = null; amHandlers = null;
+      $("#am-dtitle").textContent = "App details";
+      $("#am-dsub").textContent = "select an app";
+    }
+    if (!quiet) { $("#am-applist").innerHTML = '<div class="empty">loading apps…</div>'; amHandlers = null; }
     var url = "/api/appmanager/list?which=" + amWhich + (amUser != null ? "&user=" + amUser : "");
     fetch(dq(url)).then(function (r) { return r.json(); })
       .then(function (d) {
@@ -822,30 +837,42 @@
         // user / profile picker (only shown when the device has more than one)
         var us = $("#am-user");
         if (us && d.users) {
-          us.innerHTML = d.users.map(function (u) {
-            return '<option value="' + u.id + '">' + esc(u.name) + " (user " + u.id + ")" +
-              (u.running ? "" : " · stopped") + "</option>";
-          }).join("");
-          us.style.display = d.users.length > 1 ? "" : "none";
+          var multi = d.users.length > 1;
+          us.innerHTML = (multi ? '<option value="all">All users</option>' : "") +
+            d.users.map(function (u) {
+              return '<option value="' + u.id + '">' + esc(u.name) + " (user " + u.id + ")" +
+                (u.running ? "" : " · stopped") + "</option>";
+            }).join("");
+          us.style.display = multi ? "" : "none";
           if (amUser == null && d.users.length) amUser = d.users[0].id;
           us.value = String(amUser);
         }
+        var all = amUser === "all";
         var c = $("#am-count");
         if (c) c.textContent = d.error ? ("⚠ " + d.error) :
-          (d.count + " apps" +
-           (d.uninstalled ? " · " + d.uninstalled + " uninstalled for this user" : "") +
+          (d.count + " apps" + (all ? " across " + (d.users || []).length + " users" : "") +
+           (d.uninstalled ? " · " + d.uninstalled +
+             (all ? " not installed for any user" : " uninstalled for this user") : "") +
            (d.labels_resolved ? " · " + d.labels_resolved + " real names from APKs" : "") +
            (d.flags && d.flags !== "demo" ? " · pm " + d.flags : ""));
         renderAmList();
+        if (amPending) {  // a "find anywhere" hit asked for this package once the list is in
+          var p = amPending; amPending = null;
+          if (amRows[p]) amSelect(p);
+          else toast(shortApp(p) + " is not in this list", "warn", "try the uninstalled filter or All users");
+        }
+        if (!amSel) loadAmDefaults();
+        maybeAutoResolve(d);
       })
       .catch(function () { $("#am-applist").innerHTML = '<div class="empty">could not load apps</div>'; });
   }
   $("#am-user").addEventListener("change", function () {
-    amUser = parseInt(this.value, 10);
+    amUser = this.value === "all" ? "all" : parseInt(this.value, 10);
     loadAppManager();
   });
   function renderAmList() {
-    var q = ($("#am-search").value || "").toLowerCase();
+    var q = ($("#am-search").value || "").trim().toLowerCase();
+    var multi = (amMeta.users || []).length > 1;
     var rows = amApps.filter(function (a) {
       if (!q) return true;
       return a.package.toLowerCase().indexOf(q) >= 0 ||
@@ -854,45 +881,90 @@
     $("#am-applist").innerHTML = rows.map(function (a) {
       var name = a.label || shortApp(a.package);
       var init = name.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "?";
+      var nm = a.label_source === "guess"
+        ? ' class="am-nm guess" title="name guessed from the package id - press Resolve names for the real one"'
+        : a.label_source === "apk" ? ' class="am-nm" title="name read from the APK"' : ' class="am-nm"';
+      var ui = a.users_installed || [];
       return '<div class="am-row" data-pkg="' + esc(a.package) + '">' +
         '<div class="ai"' + (a.system ? ' style="background:var(--fg-mut)"' : "") + ">" + esc(init) + "</div>" +
-        '<div class="am-meta"><div class="am-nm">' + esc(name) +
+        '<div class="am-meta"><div' + nm + ">" + esc(name) +
         (a.system ? ' <span class="pill mut">system</span>' : "") +
+        (amUser === "all" && multi && ui.length
+          ? ' <span class="pill mut" title="Android users this package is installed for">' +
+            (ui.length > 1 ? "users " : "user ") + esc(ui.join(", ")) + "</span>" : "") +
         (a.installed === false ? ' <span class="pill crit" title="Removed for this user (debloated); still on the device">not installed</span>' : "") +
         (!a.enabled && a.installed !== false ? ' <span class="pill warn">disabled</span>' : "") +
         (a.godmode ? ' <span class="pill crit">god-mode</span>' : "") + "</div>" +
         '<div class="am-pk">' + esc(a.package) + "</div></div>" +
         (a.data_size ? '<span class="fsz">' + fmtBytes(a.data_size) + "</span>" : "") + "</div>";
-    }).join("") || '<div class="empty">' + (q ? "no match" : "no apps") + "</div>";
-    $$("#am-applist .am-row").forEach(function (row) {
-      row.addEventListener("click", function () {
-        $$("#am-applist .am-row").forEach(function (x) { x.classList.remove("sel"); });
-        row.classList.add("sel");
-        loadAmDetail(row.dataset.pkg);
-      });
-    });
+    }).join("") || (q ? amFindPrompt(q) : '<div class="empty">no apps</div>');
     if (amSel) {
       var s = $('#am-applist .am-row[data-pkg="' + CSS.escape(amSel) + '"]');
       if (s) s.classList.add("sel");
     }
     applyGlobalSearch();
   }
+  // one delegated handler for the list: app rows, and the "find anywhere" block that replaces them
+  $("#am-applist").addEventListener("click", function (e) {
+    var row = e.target.closest(".am-row");
+    if (row) { amSelect(row.dataset.pkg); return; }
+    if (e.target.closest("#am-find-btn")) { amFind(); return; }
+    var hit = e.target.closest(".am-find-row");
+    if (hit) { amOpenFound(hit.dataset.pkg, hit.dataset.user); return; }
+    var link = e.target.closest(".am-link");
+    if (link) amJump(link.dataset.pkg);
+  });
+  function amSelect(pkg) {
+    $$("#am-applist .am-row").forEach(function (x) { x.classList.toggle("sel", x.dataset.pkg === pkg); });
+    loadAmDetail(pkg);
+  }
+  // open a package named by a link (defaults block, browser chips); it must be in the loaded list
+  function amJump(pkg) {
+    if (!amRows[pkg]) {
+      toast(shortApp(pkg) + ": not in the current list - try the uninstalled filter or All users", "warn");
+      return;
+    }
+    var sb = $("#am-search");
+    if (sb.value) { sb.value = ""; renderAmList(); }  // the search filter could be hiding the row
+    amSelect(pkg);
+    var s = $('#am-applist .am-row[data-pkg="' + CSS.escape(pkg) + '"]');
+    if (s && s.scrollIntoView) s.scrollIntoView({ block: "nearest" });
+  }
   $("#am-search").addEventListener("input", renderAmList);
-  $("#am-resolve").addEventListener("click", function () {
-    toast("Resolving app names from APK resources…", "", "this reads only the manifest and resources of each APK");
+  $("#am-search").addEventListener("keydown", function (e) {  // Enter with no match = search everywhere
+    if (e.key === "Enter" && $("#am-find-btn")) amFind();
+  });
+  function startResolve(auto) {
+    if (auto) toast("Reading real app names from the APKs in the background", "",
+                    "once per session - press Resolve names to run it again");
+    else toast("Resolving app names from APK resources…", "", "this reads only the manifest and resources of each APK");
     fetch("/api/appmanager/resolve-labels", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ device: DEV }),
     }).then(function (r) { return r.json(); }).then(function (res) {
       if (res.ok === false) { toast(res.error || "could not start", "warn"); return; }
-      toast("Resolving " + res.packages + " app names", "good");
+      if (!auto) toast("Resolving " + res.packages + " app names", "good");
       var ticks = 0;
-      var iv = setInterval(function () {
+      if (amResolveIv) clearInterval(amResolveIv);
+      amResolveIv = setInterval(function () {
         if (currentTab === "appmgr") loadAppManager(true);
-        if (++ticks > 45) clearInterval(iv);
+        if (++ticks > 45) { clearInterval(amResolveIv); amResolveIv = null; }
       }, 4000);
     }).catch(function () { toast("request failed", "crit"); });
-  });
+  }
+  $("#am-resolve").addEventListener("click", function () { startResolve(false); });
+  // a list that is mostly guessed names gets resolved once per browser session, per device
+  function maybeAutoResolve(d) {
+    if (!d.can_resolve || d.demo || !d.count || (d.labels_resolved || 0) >= Math.ceil(d.count / 2)) return;
+    var key = "am-auto:" + (DEV || "default");
+    if (amAutoDone[key]) return;
+    amAutoDone[key] = 1;  // also stops repeats when sessionStorage is unavailable
+    try {
+      if (sessionStorage.getItem(key)) return;
+      sessionStorage.setItem(key, "1");
+    } catch (e) { /* storage may be blocked */ }
+    startResolve(true);
+  }
   $$("#am-filter button").forEach(function (b) {
     b.addEventListener("click", function () {
       $$("#am-filter button").forEach(function (x) { x.classList.remove("on"); });
@@ -904,7 +976,8 @@
 
   function loadAmDetail(pkg) {
     amSel = pkg;
-    $("#am-dtitle").textContent = shortApp(pkg);
+    $("#am-dtitle").textContent = (amRows[pkg] || {}).label || shortApp(pkg);
+    $("#am-dsub").textContent = pkg;
     $("#am-dbody").innerHTML = '<div class="empty">reading ' + esc(pkg) + " …</div>";
     fetch(dq("/api/appmanager/app/" + encodeURIComponent(pkg))).then(function (r) { return r.json(); })
       .then(renderAmDetail).catch(function () {
@@ -918,8 +991,10 @@
     if (destructive && typeof confirm === "function" &&
         !confirm("This will " + action.replace("-", " ") + " " +
           shortApp(params.package) + " on the device. Continue?")) return;
-    var body = Object.assign({ device: DEV, confirm: destructive, user: amUser == null ? 0 : amUser },
-                             params, { action: action });
+    var row = amRows[params.package] || {};
+    var user = typeof amUser === "number" ? amUser
+      : ((row.users_installed && row.users_installed[0]) || 0);  // all-users mode: act where it lives
+    var body = Object.assign({ device: DEV, confirm: destructive, user: user }, params, { action: action });
     fetch("/api/appmanager/action", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -929,8 +1004,10 @@
       setTimeout(function () { if (amSel) loadAmDetail(amSel); }, 600);
     }).catch(function () { toast("action failed", "crit"); });
   }
-  // one delegated handler for all action buttons in the detail pane
+  // one delegated handler for the detail pane: package links and all action buttons
   $("#am-dbody").addEventListener("click", function (e) {
+    var l = e.target.closest(".am-link");
+    if (l) { amJump(l.dataset.pkg); return; }
     var b = e.target.closest("[data-act]");
     if (!b) return;
     amAction(b.dataset.act, {
@@ -942,11 +1019,16 @@
     var det = d.detail || {};
     var pkg = d.package;
     var gy = function (k, v) { return v == null || v === "" ? "" : "<dt>" + esc(k) + "</dt><dd>" + esc(v) + "</dd>"; };
+    var meta = d.meta || {}, ui = d.users_installed || [];  // meta: WebAPK manifest (host browser, start URL)
+    var host = meta.host_browser;
     var ident = '<div class="am-sec"><h4>Identity</h4><dl class="kv2" style="padding:0">' +
       gy("package", pkg) + gy("version", (det.version_name || "?") + " (" + (det.version || "?") + ")") +
       gy("type", det.system ? "system" : "user app") +
       gy("enabled", det.enabled ? "yes" : "no — disabled") +
+      gy("installed for", ui.length ? ui.map(function (u) { return "user " + u; }).join(", ") : null) +
       gy("installer", det.installer || "unknown") +
+      gy("web app URL", meta.start_url) + gy("scope", meta.scope) +
+      gy("opened by", host ? ((amRows[host] || {}).label || shortApp(host)) + " (" + host + ")" : null) +
       gy("target SDK", det.target_sdk) + gy("min SDK", det.min_sdk) + gy("ABI", det.abi) +
       gy("installed", det.first_install) + gy("updated", det.last_update) +
       gy("data dir", det.data_dir) + gy("signature", det.sig) +
@@ -1004,6 +1086,119 @@
       : "";
 
     $("#am-dbody").innerHTML = actions + ident + godsec + perms + opsec + comps;
+  }
+
+  /* ---- "find anywhere": the search box matched nothing in the loaded list ---- */
+  function amFindPrompt(q) {
+    return '<div class="am-find" id="am-find">' +
+      "<p>No app named &ldquo;" + esc(q) + "&rdquo; for " + esc(amUserLabel()) + " (" + amApps.length +
+      (amWhich === "all" ? " packages checked, incl. uninstalled and hidden"
+                         : " packages checked in the &ldquo;" + esc(amWhich) + "&rdquo; filter") + ").</p>" +
+      '<button class="btn p" id="am-find-btn">Search every user and the file system</button></div>';
+  }
+  function amFind() {
+    var q = ($("#am-search").value || "").trim(), box = $("#am-find");
+    if (!q || !box) return;
+    box.innerHTML = '<div class="empty">searching every user and the APK folders…</div>';
+    fetch(dq("/api/appmanager/find?q=" + encodeURIComponent(q))).then(function (r) { return r.json(); })
+      .then(function (f) { renderAmFind(q, f); })
+      .catch(function () { if ($("#am-find")) $("#am-find").innerHTML = '<div class="hint">search request failed</div>'; });
+  }
+  function renderAmFind(q, f) {
+    var box = $("#am-find");
+    if (!box) return;  // the list was re-rendered while the device was searched
+    if (f.error) { box.innerHTML = '<div class="hint">' + esc(f.error) + "</div>"; return; }
+    var matches = f.matches || [], dirs = f.apk_dirs || [], browsers = f.browsers || [], users = f.users || [];
+    var h = "<p>" + esc(f.scanned || 0) + " distinct packages seen across " + users.length +
+      " user" + (users.length === 1 ? "" : "s") + ", incl. uninstalled and hidden.</p>";
+    if (matches.length) {
+      h += '<div class="am-find-rows">' + matches.map(function (m) {
+        var inst = (m.users || []).filter(function (u) { return u.installed; });
+        return '<div class="am-find-row" data-pkg="' + esc(m.package) + '" data-user="' +
+          (inst.length ? esc(inst[0].id) : "") + '" title="open this app">' +
+          '<div class="nm">' + esc(m.label || shortApp(m.package)) +
+          (m.system ? ' <span class="pill mut">system</span>' : "") +
+          '<div class="pk">' + esc(m.package) + "</div></div>" +
+          '<div class="us">' + (m.users || []).map(function (u) {
+            return '<span class="pill ' + (u.installed ? "good" : "crit") + '">user ' + esc(u.id) +
+              (u.installed ? " installed" : " not installed") + "</span>";
+          }).join(" ") + "</div></div>";
+      }).join("") + "</div>";
+    }
+    if (dirs.length) {
+      h += '<p class="k">APK folders on disk matching:</p><div class="pk">' +
+        dirs.map(function (p) { return esc(p); }).join("<br>") + "</div>";
+    }
+    if (browsers.length) {
+      h += '<p class="k">Browsers on this device:</p><div class="chips">' + browsers.map(function (b) {
+        return '<span class="pill ' + (b.default ? "good" : "mut") + ' am-link" data-pkg="' + esc(b.package) +
+          '" title="' + esc(b.component || "") + '">' + esc(b.label || shortApp(b.package)) + " · " +
+          esc(b.package) + (b.default ? " · default" : "") + "</span>";
+      }).join(" ") + "</div>";
+    }
+    if (!matches.length && !dirs.length) {
+      h += '<p class="verdict">Nothing named &ldquo;' + esc(q) + "&rdquo; exists on this device for any user. " +
+        "It simply is not installed on this ROM (custom ROMs often ship without Chrome or Google Photos, " +
+        "for example) and a different app is filling the role - see the browsers above. " +
+        "Install it from the Play Store or sideload an APK from the Files tab.</p>";
+    }
+    box.innerHTML = h;
+  }
+  // a hit for another user: switch the picker there, drop filters that could hide it, reload, then open it
+  function amOpenFound(pkg, user) {
+    if (user !== "" && amUser !== "all" && parseInt(user, 10) !== amUser) {
+      amUser = parseInt(user, 10);
+      $("#am-user").value = String(amUser);
+    }
+    if (amWhich !== "all") {
+      amWhich = "all";
+      $$("#am-filter button").forEach(function (x) { x.classList.toggle("on", x.dataset.which === "all"); });
+    }
+    $("#am-search").value = "";
+    amPending = pkg;
+    loadAppManager();
+  }
+
+  /* ---- "Defaults on this device": fills the detail pane while no app is selected ---- */
+  function loadAmDefaults() {
+    var key = (DEV || "default") + ":" + (typeof amUser === "number" ? amUser : 0);
+    if (amHandlers && amHandlersKey === key) { renderAmDefaults(amHandlers); return; }
+    fetch(dq("/api/appmanager/handlers" + (typeof amUser === "number" ? "?user=" + amUser : "")))
+      .then(function (r) { return r.json(); })
+      .then(function (h) {
+        amHandlers = h; amHandlersKey = key;
+        if (!amSel) renderAmDefaults(h);
+      }).catch(function () { /* the pick-an-app placeholder stays */ });
+  }
+  // label, role name in roles{}, intent name in handlers{} (fallback when no role holder is set)
+  var AM_ROLES = [["Browser", "browser", "browser"], ["Launcher", "home", "launcher"], ["SMS", "sms", "sms"],
+                  ["Phone", "dialer", "dialer"], ["Assistant", "assistant", null]];
+  function amLink(pkg) {
+    return '<span class="am-link" data-pkg="' + esc(pkg) + '">' + esc((amRows[pkg] || {}).label || shortApp(pkg)) +
+      '</span> <span class="pk">' + esc(pkg) + "</span>";
+  }
+  function renderAmDefaults(h) {
+    var roles = h.roles || {}, hs = h.handlers || {};
+    var rows = AM_ROLES.map(function (r) {
+      var holder = (roles[r[1]] || [])[0] || (r[2] === "browser" ? h.default_browser : null) ||
+        (r[2] && hs[r[2]] && hs[r[2]][0] ? hs[r[2]][0].package : null);
+      return '<div class="am-def"><span class="k">' + r[0] + '</span><span class="v">' +
+        (holder ? amLink(holder) : '<span class="pk">none</span>') + "</span></div>";
+    }).join("");
+    var browsers = hs.browser || [];
+    var chips = browsers.length ? '<div class="am-def"><span class="k">All browsers</span><span class="v chips">' +
+      browsers.map(function (b) {
+        var def = b.package === h.default_browser;
+        return '<span class="pill ' + (def ? "good" : "mut") + ' am-link" data-pkg="' + esc(b.package) +
+          '" title="' + esc(b.component || "") + '">' +
+          esc((amRows[b.package] || {}).label || b.label || shortApp(b.package)) + " · " + esc(b.package) +
+          (def ? " · default" : "") + "</span>";
+      }).join(" ") + "</span></div>" : "";
+    $("#am-dbody").innerHTML = '<div class="am-sec am-defaults"><h4>Defaults on this device' +
+      (h.user != null ? " · user " + esc(h.user) : "") + "</h4>" +
+      (h.error ? '<div class="hint">' + esc(h.error) + "</div>" : rows + chips) +
+      '<div class="hint">Role holders from the system role manager; click a name to open that app.</div></div>' +
+      '<div class="empty">Pick an app on the left to see its permissions, components, app-ops, signature and storage, and to manage it.</div>';
   }
 
   /* ================= product polish ================= */

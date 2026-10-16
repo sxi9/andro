@@ -7,13 +7,16 @@ Three tiers, cheapest first:
   3. the real label from the APK's own resources, extracted WITHOUT pulling
      the whole APK: we read the zip's central directory over adb, fetch only
      AndroidManifest.xml + resources.arsc by byte range, and decode them with
-     the optional `pyaxmlparser` package. Results are cached in the store.
+     `pyaxmlparser` (a requirement, but imported lazily so everything else
+     works without it). Results are cached in the store; for WebAPKs the
+     manifest's start URL / scope / host browser are cached too ("apk_meta").
 """
 from __future__ import annotations
 
 import io
 import logging
 import os
+import re
 import struct
 import tempfile
 import zipfile
@@ -21,6 +24,17 @@ import zlib
 from typing import Callable
 
 log = logging.getLogger("sentinel.labels")
+
+# Chromium-style WebAPKs: a browser-generated shell whose package is a hash,
+# so the only useful name lives in the manifest (see _manifest_meta).
+_WEBAPK_RE = re.compile(r"^org\.chromium\.webapk\.|\.webapk\.")
+# "foo_v2" -> "foo"; a bare "v2" segment becomes empty (dropped). A bare vN is
+# stripped only when it IS the segment, so "tv2" stays a word.
+_VSUFFIX_RE = re.compile(r"(?:^|_)v\d+$")
+_HEXHASH_RE = re.compile(r"^[a-f0-9]{8,}(_v\d+)?$")
+_HEX = set("0123456789abcdef")
+# generic vendor/noise segments never shown as a name
+_NOISE = {"android", "app", "apps", "mobile", "client", "ui", "lite", "pro", "free"}
 
 BUILTIN_LABELS: dict[str, str] = {
     # Google
@@ -88,18 +102,54 @@ BUILTIN_LABELS: dict[str, str] = {
     "com.termux": "Termux", "org.fdroid.fdroid": "F-Droid",
     "io.github.muntashirakon.AppManager": "App Manager", "com.topjohnwu.magisk": "Magisk",
     "eu.chainfire.supersu": "SuperSU", "me.weishu.kernelsu": "KernelSU",
+    # Browsers (the role-holder views lean on these)
+    "org.chromium.chrome": "Chromium", "com.kiwibrowser.browser": "Kiwi Browser",
+    "org.cromite.cromite": "Cromite", "org.bromite.bromite": "Bromite",
+    "app.vanadium.browser": "Vanadium", "us.spotco.mulch": "Mulch",
+    "org.mozilla.fenix": "Firefox Nightly", "us.spotco.fennec_dos": "Mull",
+    "org.lineageos.jelly": "Jelly Browser", "com.vivaldi.browser": "Vivaldi",
+    "com.duckduckgo.mobile.android": "DuckDuckGo", "com.mi.globalbrowser": "Mi Browser",
+    "com.android.browser": "Browser", "org.matrix.chromext": "ChromeXt",
+    # AOSP / custom-ROM defaults
+    "com.miui.gallery": "Gallery (MIUI)", "org.lineageos.aperture": "Aperture Camera",
+    "com.android.launcher3": "Launcher3", "com.android.dialer": "Phone",
+    "com.android.messaging": "Messaging",
 }
+
+
+def _hash_like(seg: str) -> bool:
+    """True for WebAPK/build-hash segments ("ae2b93f705916af0e", "a1b2c3d4e5f6")
+    that would otherwise become the display name."""
+    s = seg.lower()
+    if _HEXHASH_RE.match(s):
+        return True
+    if len(s) >= 10 and set(s) <= _HEX:
+        return True
+    # mostly-digit tokens; short ones like "mp3" or "x264" are real words
+    return len(s) >= 6 and sum(c.isdigit() for c in s) / len(s) >= 0.4
 
 
 def friendly_name(pkg: str) -> str:
     """Best-effort readable name when no label is known."""
     if pkg in BUILTIN_LABELS:
         return BUILTIN_LABELS[pkg]
+    if _WEBAPK_RE.search(pkg):
+        return "Web app (WebAPK)"
     parts = [p for p in pkg.split(".") if p]
-    # drop generic vendor/noise segments from the end
-    noise = {"android", "app", "apps", "mobile", "client", "ui", "lite", "pro", "free"}
-    tail = [p for p in parts if p.lower() not in noise]
-    seg = (tail[-1] if tail else parts[-1]) if parts else pkg
+    if not parts:
+        return pkg
+    # drop version suffixes and hash-like segments before choosing a name
+    words = [w for w in (_VSUFFIX_RE.sub("", p) for p in parts) if w and not _hash_like(w)]
+    # prefer the last meaningful segment after the TLD ("com.foo.bar" -> bar);
+    # only noise left -> first one after the TLD; only hashes -> whatever remains
+    rest = words[1:]
+    meaningful = [w for w in rest if w.lower() not in _NOISE]
+    if meaningful:
+        seg = meaningful[-1]
+    elif rest:
+        seg = rest[0]
+    else:
+        seg = words[0] if words else parts[-1]
     seg = seg.replace("_", " ")
     return seg[:1].upper() + seg[1:]
 
@@ -167,8 +217,35 @@ def _adb_range_reader(adb, remote_path: str) -> tuple[int, Callable[[int, int], 
     return size, read_range
 
 
+_ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
+# <meta-data android:name=...> entries a Chromium WebAPK shell carries
+_META_KEYS = {
+    "org.chromium.webapk.shell_apk.hostBrowserPackageName": "host_browser",
+    "org.chromium.webapk.shell_apk.startUrl": "start_url",
+    "org.chromium.webapk.shell_apk.scope": "scope",
+}
+
+
+def _manifest_meta(root) -> dict:
+    """{host_browser?, start_url?, scope?} from <application><meta-data> of a
+    parsed manifest (lxml Element). Anything odd -> {} rather than an error."""
+    out: dict[str, str] = {}
+    try:
+        app = root.find("application") if root is not None else None
+        for md in (app.findall("meta-data") if app is not None else []):
+            key = _META_KEYS.get(md.get(_ANDROID_NS + "name") or "")
+            val = md.get(_ANDROID_NS + "value")
+            if key and val is not None and str(val).strip():
+                out[key] = str(val).strip()
+    except Exception as e:  # noqa: BLE001 - manifest quirks are not our problem
+        log.debug("manifest meta: %s", e)
+        return {}
+    return out
+
+
 def extract_label_from_apk(size: int, read_range: Callable[[int, int], bytes]) -> dict:
-    """Return {label, icon_png_b64?} using only the manifest + resources."""
+    """Return {label?, meta?} using only the manifest + resources; meta is the
+    WebAPK subset from _manifest_meta and is present only when non-empty."""
     try:
         from pyaxmlparser import APK  # type: ignore
     except ImportError:
@@ -188,7 +265,11 @@ def extract_label_from_apk(size: int, read_range: Callable[[int, int], bytes]) -
     try:
         apk = APK(tmp)
         label = (apk.get_app_name() or "").strip()
-        return {"label": label} if label else {}
+        out: dict = {"label": label} if label else {}
+        meta = _manifest_meta(apk.get_android_manifest_xml())
+        if meta:
+            out["meta"] = meta
+        return out
     except Exception as e:  # noqa: BLE001 - any APK quirk just means "no label"
         log.debug("label extraction failed: %s", e)
         return {}
@@ -201,9 +282,13 @@ def extract_label_from_apk(size: int, read_range: Callable[[int, int], bytes]) -
 
 def resolve_labels(dctx, pkgs: list[str], progress=None) -> dict[str, str]:
     """Resolve real labels for pkgs over adb, caching in the device store.
-    Returns {pkg: label} for everything resolved (cached + new)."""
+    Returns {pkg: label} for everything resolved (cached + new). WebAPK
+    manifest facts land in the "apk_meta" snapshot alongside."""
     cache: dict[str, str] = dctx.store.get_snapshot("labels") or {}
-    todo = [p for p in pkgs if p not in cache]
+    meta_cache: dict[str, dict] = dctx.store.get_snapshot("apk_meta") or {}
+    # WebAPKs labelled before meta existed are read once more for their URL
+    todo = [p for p in pkgs
+            if p not in cache or (_WEBAPK_RE.search(p) and p not in meta_cache)]
     for i, pkg in enumerate(todo):
         try:
             paths = dctx.adb.apk_paths(pkg)
@@ -215,13 +300,17 @@ def resolve_labels(dctx, pkgs: list[str], progress=None) -> dict[str, str]:
             got = extract_label_from_apk(size, rr)
             if got.get("label"):
                 cache[pkg] = got["label"]
+            if got.get("meta"):
+                meta_cache[pkg] = got["meta"]
         except Exception as e:  # noqa: BLE001
             log.debug("label %s: %s", pkg, e)
         if progress and (i % 10 == 0 or i == len(todo) - 1):
             progress(i + 1, len(todo))
         if i % 25 == 0:
             dctx.store.put_snapshot("labels", cache)
+            dctx.store.put_snapshot("apk_meta", meta_cache)
     dctx.store.put_snapshot("labels", cache)
+    dctx.store.put_snapshot("apk_meta", meta_cache)
     return cache
 
 

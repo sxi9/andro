@@ -351,3 +351,32 @@ tbody tr.rowlink{cursor:pointer}
 .comp{font-size:11px;font-family:var(--ff-mono);padding:2px 7px;border-radius:5px;background:var(--bg-elev2);
   color:var(--fg-dim);margin:2px 3px 0 0;display:inline-block;word-break:break-all}
 .comp.off{background:var(--crit-dim);color:var(--crit)}
+/* names guessed from the package id (no APK label yet) read as tentative */
+.am-row .am-nm.guess{font-style:italic;color:var(--fg-mut)}
+.am-row .am-nm.guess .pill{font-style:normal}
+/* clickable package references in the defaults block and the find-anywhere results */
+.am-link{color:var(--accent);cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px}
+.am-link:hover{text-decoration-style:solid}
+.pill.am-link{text-decoration:none}
+.pill.am-link:hover{border-color:var(--accent);color:var(--accent)}
+.am-find{padding:14px 15px;font-size:12.5px;line-height:1.5}
+.am-find p{margin:0 0 10px}
+.am-find .k{color:var(--fg-mut);font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin:12px 0 6px}
+.am-find .pk,.am-defaults .pk{font-family:var(--ff-mono);font-size:11px;color:var(--fg-mut);word-break:break-all}
+.am-find .hint,.am-defaults .hint{font-size:11px;color:var(--fg-mut);font-family:var(--ff-mono)}
+.am-find-rows{border:1px solid var(--border-soft);border-radius:var(--r-sm);overflow:hidden;margin-bottom:4px}
+.am-find-row{display:grid;grid-template-columns:1fr auto;gap:6px 10px;align-items:center;padding:8px 10px;
+  border-bottom:1px solid var(--border-soft);cursor:pointer}
+.am-find-row:last-child{border-bottom:0}
+.am-find-row:hover{background:var(--bg-elev)}
+.am-find-row .nm{font-weight:600;font-size:12.5px;min-width:0}
+.am-find-row .us{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}
+.am-find .chips,.am-defaults .chips{display:flex;gap:6px;flex-wrap:wrap}
+.am-find .verdict{margin-top:12px;padding:10px 12px;border:1px dashed var(--border);border-radius:var(--r);
+  background:var(--panel-2);color:var(--fg-dim)}
+.am-defaults .am-def{display:grid;grid-template-columns:120px 1fr;gap:4px 12px;padding:5px 0;font-size:12.5px;
+  border-bottom:1px solid var(--border-soft);align-items:baseline}
+.am-defaults .am-def .k{color:var(--fg-mut);font-size:11.5px}
+.am-defaults .am-def .v{min-width:0;word-break:break-word}
+.am-defaults .hint{margin-top:8px}
+@media (max-width:980px){.am-find-row{grid-template-columns:1fr}.am-find-row .us{justify-content:flex-start}}

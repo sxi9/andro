@@ -229,7 +229,7 @@
       <section class="panel" data-panel="appmgr">
         <div class="am-layout">
           <div class="card pad0 am-list">
-            <div class="ch"><h3>All apps</h3><span class="tiphint" data-tip="Every installed package, system and user. Filter by type, search by name or package, and click an app for full details and actions.">?</span>
+            <div class="ch"><h3>All apps</h3><span class="tiphint" data-tip="Every package on the device, system and user. Filter by type (uninstalled = debloated for this user but still on disk), pick the Android user / profile or all users, search by name or package, and click an app for full details and actions. If something is missing, search for it and use 'Search every user and the file system'.">?</span>
               <div class="chips-filter" id="am-filter">
                 <button class="on" data-which="all">all</button>
                 <button data-which="user">user</button>
@@ -241,13 +241,13 @@
             </div>
             <div class="toolbar">
               <input id="am-search" type="search" placeholder="Search by name or package…" autocomplete="off">
-              <button class="btn" id="am-resolve" title="Read each app's real name from its APK (manifest + resources only, fast). Needs pip install pyaxmlparser on this computer.">Resolve names</button>
+              <button class="btn" id="am-resolve" title="Read each app's real name from its APK (manifest + resources only, fast). Runs automatically the first time a device's list opens; press to run it again. Needs pip install pyaxmlparser on this computer.">Resolve names</button>
             </div>
             <div id="am-count" class="hint" style="padding:6px 15px;border-bottom:1px solid var(--border-soft)"></div>
             <div class="applist" id="am-applist" style="max-height:620px"><div class="empty">loading apps…</div></div>
           </div>
           <div class="card pad0 am-detail" id="am-detail">
-            <div class="ch"><h3 id="am-dtitle">App details</h3><span class="hint">select an app</span></div>
+            <div class="ch"><h3 id="am-dtitle">App details</h3><span class="hint" id="am-dsub">select an app</span></div>
             <div id="am-dbody"><div class="empty">Pick an app on the left to see its permissions, components, app-ops, signature and storage, and to manage it.</div></div>
           </div>
         </div>

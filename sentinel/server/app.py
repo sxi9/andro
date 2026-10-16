@@ -209,7 +209,61 @@ def _demo_app_detail(pkg: str) -> dict:
         "godmode": [], "sizes": {"data": 48 * 1024 * 1024, "cache": 12 * 1024 * 1024,
                                  "app": 44 * 1024 * 1024},
         "apk_paths": [f"/data/app/~~x/{pkg}-y/base.apk"],
+        "users_installed": [0],
     }
+
+
+_DEMO_USERS = [{"id": 0, "name": "Owner", "running": True},
+               {"id": 10, "name": "Work profile", "running": True}]
+# demo: Chrome is debloated for the owner but still installed in the work profile
+_DEMO_CHROME = "com.android.chrome"
+
+
+def _can_resolve() -> bool:
+    """True when the optional APK parser is installed on this host."""
+    try:
+        import pyaxmlparser  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _demo_handlers(user: int) -> dict:
+    from ..enrich.labels import label_for
+    roles = {"browser": [_DEMO_CHROME], "home": ["com.android.launcher3"],
+             "sms": ["com.google.android.apps.messaging"],
+             "dialer": ["com.google.android.dialer"], "assistant": []}
+    comps = {"browser": f"{_DEMO_CHROME}/com.google.android.apps.chrome.Main",
+             "launcher": "com.android.launcher3/.Launcher",
+             "sms": "com.google.android.apps.messaging/.ui.ConversationListActivity",
+             "dialer": "com.google.android.dialer/.DialtactsActivity",
+             "camera": "com.android.camera2/com.android.camera.CaptureActivity"}
+    handlers = {k: [{"package": c.split("/")[0], "label": label_for(c.split("/")[0]),
+                     "component": c}] for k, c in comps.items()}
+    return {"user": user, "roles": roles, "handlers": handlers, "default_browser": _DEMO_CHROME}
+
+
+def _demo_find(q: str) -> dict:
+    from ..enrich.labels import label_for
+    from ..service.appmanager import QUERY_RE
+    if not QUERY_RE.match(q or "") or not q.strip():
+        return {"query": (q or "")[:64], "users": [], "scanned": 0, "matches": [],
+                "apk_dirs": [], "browsers": [], "error": "invalid query"}
+    ql = q.strip().lower()
+    apps = _demo_app_list()
+    matches = []
+    for a in apps:
+        label = label_for(a["package"])
+        if ql in a["package"].lower() or ql in label.lower():
+            chrome = a["package"] == _DEMO_CHROME
+            matches.append({"package": a["package"], "label": label, "system": a["system"],
+                            "users": [{"id": 0, "installed": not chrome},
+                                      {"id": 10, "installed": chrome}]})
+    h = _demo_handlers(0)
+    return {"query": q.strip(), "users": _DEMO_USERS, "scanned": len(apps), "matches": matches,
+            "apk_dirs": ["/product/app/Chrome"] if "chrome" in ql else [],
+            "browsers": [{**b, "default": b["package"] == h["default_browser"]}
+                         for b in h["handlers"]["browser"]]}
 
 
 def _demo_files(path: str) -> list[dict]:
@@ -583,7 +637,17 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------- app manager ----------
     @app.get("/api/appmanager/list")
     async def am_list(which: str = "all", device: str | None = None,
-                      user: int | None = None, uninstalled: int = 1):
+                      user: str | None = None, uninstalled: int = 1):
+        # user: omitted = owner (pm's default), "all" = every user/profile, or an id
+        uid: int | str | None
+        if user is None or user == "":
+            uid = None
+        elif user == "all":
+            uid = "all"
+        elif user.isdigit() and int(user) <= 999:
+            uid = int(user)
+        else:
+            return JSONResponse({"error": "invalid user"}, status_code=400)
         dctx = _dev(device)
         if dctx is None or dctx.adb is None:
             from ..enrich.labels import BUILTIN_LABELS, label_for
@@ -591,17 +655,41 @@ def create_app(cfg: Config) -> FastAPI:
             for a in apps:
                 a["label"] = label_for(a["package"])
                 a["label_source"] = "known" if a["package"] in BUILTIN_LABELS else "guess"
-                a["installed"] = a["package"] != "com.android.chrome"  # one debloated example
+                a["users_installed"] = [10] if a["package"] == _DEMO_CHROME else [0]
+                a["installed"] = uid == "all" or (uid or 0) in a["users_installed"]
             if which == "uninstalled":
                 apps = [a for a in apps if not a["installed"]]
             return {"demo": True, "apps": apps, "count": len(apps), "flags": "demo",
-                    "users": [{"id": 0, "name": "Owner", "running": True},
-                              {"id": 10, "name": "Work profile", "running": True}],
-                    "user": user, "uninstalled": sum(1 for a in apps if not a["installed"]),
-                    "labels_resolved": 0}
+                    "users": _DEMO_USERS, "user": uid if uid is not None else 0,
+                    "uninstalled": sum(1 for a in apps if not a["installed"]),
+                    "labels_resolved": 0, "can_resolve": _can_resolve()}
         from ..service import appmanager
-        return await asyncio.to_thread(appmanager.list_apps, dctx, which, user,
-                                       bool(uninstalled))
+        res = await asyncio.to_thread(appmanager.list_apps, dctx, which, uid,
+                                      bool(uninstalled))
+        res["can_resolve"] = _can_resolve()
+        return res
+
+    @app.get("/api/appmanager/find")
+    async def am_find(q: str = "", device: str | None = None):
+        """Prove whether a package exists anywhere: every user (incl.
+        uninstalled-for-user), the APK folders on disk, registered browsers."""
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"demo": True, **_demo_find(q)}
+        from ..service import appmanager
+        return await asyncio.to_thread(appmanager.find_package, dctx, q)
+
+    @app.get("/api/appmanager/handlers")
+    async def am_handlers(user: int = 0, device: str | None = None):
+        """Role holders (browser/home/sms/dialer/assistant) and the activities
+        answering the browser/launcher/sms/dialer/camera intents for a user."""
+        if not 0 <= user <= 999:
+            return JSONResponse({"error": "invalid user"}, status_code=400)
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"demo": True, **_demo_handlers(user)}
+        from ..service import appmanager
+        return await asyncio.to_thread(appmanager.handlers, dctx, user)
 
     @app.post("/api/appmanager/resolve-labels")
     async def am_resolve_labels(body: dict | None = None):

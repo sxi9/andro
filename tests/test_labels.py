@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from sentinel.enrich.labels import (RemoteZip, extract_label_from_apk, friendly_name,
-                                    label_for)
+from sentinel.enrich import labels
+from sentinel.enrich.labels import (RemoteZip, _manifest_meta, extract_label_from_apk,
+                                    friendly_name, label_for, resolve_labels)
 
 SAMPLE_APK = Path("/tmp/claude-0/-home-user-andro/9f21e297-6624-5b9e-afc1-ff4f09c54e08/"
                   "scratchpad/apk-test/fdroid-sample.apk")
@@ -22,6 +23,98 @@ def test_friendly_names():
     assert friendly_name("com.led.qr_flash") == "Qr flash"
     assert label_for("com.whatsapp") == "WhatsApp"
     assert label_for("com.x.y", {"com.x.y": "Real Name"}) == "Real Name"
+
+
+def test_friendly_names_skip_webapks_and_hashes():
+    # Chromium WebAPK shells: the package is a hash, never a name
+    assert friendly_name("org.chromium.webapk.ae2b93f705916af0e_v2") == "Web app (WebAPK)"
+    assert friendly_name("com.sec.android.app.sbrowser.webapk.abc123def4567890") == "Web app (WebAPK)"
+    # hash-like tail segment and version suffix are skipped, not capitalised
+    got = friendly_name("com.foo.a1b2c3d4e5f6_v2")
+    assert "a1b2" not in got.lower() and got == "Foo"
+    assert friendly_name("com.example.scanner_v3") == "Scanner"
+    assert friendly_name("com.example.scanner.v2") == "Scanner"
+    # everything after the TLD is hash -> first real segment
+    assert friendly_name("org.chromium.ae2b93f705916af0e") == "Chromium"
+    # short digit-bearing tokens are still words
+    assert friendly_name("com.example.mp3") == "Mp3"
+    # new browser/ROM entries resolve from the built-in map
+    assert friendly_name("org.matrix.chromext") == "ChromeXt"
+    assert friendly_name("org.cromite.cromite") == "Cromite"
+    assert friendly_name("com.miui.gallery") == "Gallery (MIUI)"
+
+
+_MANIFEST = """<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.chromium.webapk.ae2b93f705916af0e_v2">
+  <application android:label="ChatGPT">
+    <meta-data android:name="org.chromium.webapk.shell_apk.hostBrowserPackageName"
+               android:value="org.cromite.cromite"/>
+    <meta-data android:name="org.chromium.webapk.shell_apk.startUrl"
+               android:value="https://chatgpt.com/"/>
+    <meta-data android:name="org.chromium.webapk.shell_apk.scope"
+               android:value="https://chatgpt.com/"/>
+    <meta-data android:name="org.chromium.webapk.shell_apk.shellApkVersion"
+               android:value="170"/>
+    <activity android:name=".MainActivity">
+      <meta-data android:name="org.chromium.webapk.shell_apk.startUrl"
+                 android:value="https://ignored.example/"/>
+    </activity>
+  </application>
+</manifest>"""
+
+
+def test_manifest_meta_reads_webapk_entries():
+    etree = pytest.importorskip("lxml.etree")
+    root = etree.fromstring(_MANIFEST.encode())
+    assert _manifest_meta(root) == {"host_browser": "org.cromite.cromite",
+                                    "start_url": "https://chatgpt.com/",
+                                    "scope": "https://chatgpt.com/"}
+    # tolerant of anything that is not a WebAPK manifest
+    assert _manifest_meta(None) == {}
+    assert _manifest_meta(etree.fromstring(b"<manifest/>")) == {}
+    assert _manifest_meta(etree.fromstring(b"<manifest><application/></manifest>")) == {}
+    assert _manifest_meta(object()) == {}
+
+
+class _Store:
+    def __init__(self) -> None:
+        self.snapshots: dict[str, object] = {}
+        self.puts: list[str] = []
+
+    def get_snapshot(self, key):
+        return self.snapshots.get(key)
+
+    def put_snapshot(self, key, data):
+        self.puts.append(key)
+        self.snapshots[key] = data
+
+
+class _Adb:
+    def apk_paths(self, pkg):
+        return ["/data/app/~~x/" + pkg + "-1/base.apk"]
+
+
+class _Ctx:
+    def __init__(self) -> None:
+        self.adb = _Adb()
+        self.store = _Store()
+
+
+def test_resolve_labels_writes_labels_and_meta_snapshots(monkeypatch):
+    ctx = _Ctx()
+    ctx.store.snapshots["labels"] = {"com.cached": "Cached"}
+    monkeypatch.setattr(labels, "_adb_range_reader", lambda adb, path: (1234, lambda o, n: b""))
+    monkeypatch.setattr(labels, "extract_label_from_apk",
+                        lambda size, rr: {"label": "ChatGPT",
+                                          "meta": {"start_url": "https://chatgpt.com/"}})
+    pkg = "org.chromium.webapk.ae2b93f705916af0e_v2"
+    seen: list[tuple[int, int]] = []
+    got = resolve_labels(ctx, [pkg, "com.cached"], progress=lambda i, n: seen.append((i, n)))
+    assert got == {"com.cached": "Cached", pkg: "ChatGPT"}
+    assert ctx.store.snapshots["labels"] == got
+    assert ctx.store.snapshots["apk_meta"] == {pkg: {"start_url": "https://chatgpt.com/"}}
+    assert "labels" in ctx.store.puts and "apk_meta" in ctx.store.puts
+    assert seen == [(1, 1)]  # the cached package was not re-read
 
 
 def _local_reader(path: Path):

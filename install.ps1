@@ -1,4 +1,4 @@
-# Android Sentinel installer — Windows (PowerShell).
+# Android Sentinel installer - Windows (PowerShell).
 #   .\install.ps1            install to $HOME\android-sentinel
 #   .\install.ps1 -Demo      install, then start demo mode right away
 param(
@@ -37,7 +37,7 @@ $VenvRoot = $Dir
 if ($Dir -match ';') {
     $VenvRoot = Join-Path $env:LOCALAPPDATA "android-sentinel"
     New-Item -ItemType Directory -Force -Path $VenvRoot | Out-Null
-    Say "checkout path contains ';' — venv goes to $VenvRoot instead"
+    Say "checkout path contains ';' - venv goes to $VenvRoot instead"
 }
 Say "creating virtualenv"
 python -m venv (Join-Path $VenvRoot ".venv")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Android Sentinel installer — Linux / macOS.
+# Android Sentinel installer - Linux / macOS.
 # Clones (or updates) the repo, builds a venv, installs deps, and prints how to run.
 #   ./install.sh                 install to ~/android-sentinel
 #   ./install.sh /opt/sentinel   install somewhere else
@@ -37,7 +37,7 @@ elif [ -d "$DIR/.git" ]; then
   git -C "$DIR" fetch origin "$BRANCH" && git -C "$DIR" checkout "$BRANCH" \
     && git -C "$DIR" pull --ff-only origin "$BRANCH"
 else
-  say "cloning $REPO ($BRANCH) → $DIR"
+  say "cloning $REPO ($BRANCH) -> $DIR"
   git clone -b "$BRANCH" "$REPO" "$DIR"
 fi
 
@@ -47,12 +47,12 @@ VENV_ROOT="$DIR"
 case "$DIR" in *:*)
   VENV_ROOT="$HOME/.local/share/android-sentinel"
   mkdir -p "$VENV_ROOT"
-  say "checkout path contains ':' — venv goes to $VENV_ROOT instead"
+  say "checkout path contains ':' - venv goes to $VENV_ROOT instead"
 ;; esac
 
 say "creating virtualenv"
 python3 -m venv "$VENV_ROOT/.venv" 2>/dev/null || {
-  fail "python3 -m venv failed — on Debian/Ubuntu: sudo apt install python3-venv, then re-run"
+  fail "python3 -m venv failed - on Debian/Ubuntu: sudo apt install python3-venv, then re-run"
 }
 PY="$VENV_ROOT/.venv/bin/python"
 "$VENV_ROOT/.venv/bin/pip" install --quiet --upgrade pip

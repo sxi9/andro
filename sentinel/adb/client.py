@@ -210,6 +210,26 @@ class AdbClient:
             raise AdbError("port out of range")
         return self._server_cmd(["-s", serial, "tcpip", str(int(port))])
 
+    def _adbd_cmd(self, verb: str) -> tuple[bool, str]:
+        # `adb root` / `adb unroot` restart adbd; production builds refuse with
+        # "adbd cannot run as root". Never raises: the caller shows the text.
+        try:
+            p = subprocess.run(self._base() + [verb], capture_output=True, text=True,
+                               timeout=20, errors="replace")
+        except FileNotFoundError:
+            return False, f"adb binary not found: {self.adb_path}"
+        except subprocess.TimeoutExpired:
+            return False, f"adb {verb} timed out"
+        out = ((p.stdout or "") + (p.stderr or "")).strip()
+        ok = p.returncode == 0 and "cannot run as root" not in out and "error" not in out.lower()
+        return ok, out or f"adb {verb}: done"
+
+    def root(self) -> tuple[bool, str]:
+        return self._adbd_cmd("root")
+
+    def unroot(self) -> tuple[bool, str]:
+        return self._adbd_cmd("unroot")
+
     # ---- capability probes ----
     def has_root(self) -> bool:
         try:
@@ -292,6 +312,37 @@ class AdbClient:
                 ok = False
         size = os.path.getsize(local_tar) if os.path.exists(local_tar) else 0
         return size, ok
+
+    def push_file(self, local, remote: str, *, timeout: float = 600.0) -> bool:
+        """`adb push` one local file to a device path (/data/local/tmp is the
+        shell-writable staging area). Returns True on success."""
+        full = self._base() + ["push", str(local), remote]
+        try:
+            p = subprocess.run(full, capture_output=True, text=True, timeout=timeout,
+                               errors="replace")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        return p.returncode == 0
+
+    def install(self, files: list[str], flags: list[str], *,
+                timeout: float = 1200.0) -> tuple[bool, str]:
+        """`adb install` (one APK) or `adb install-multiple` (base + splits).
+        flags are fixed tokens chosen by the caller (-r, -d, -g, -t, --user N,
+        -i pkg); files are local paths. Returns (ok, output); never raises."""
+        if not files:
+            return False, "no APK files"
+        verb = "install" if len(files) == 1 else "install-multiple"
+        full = self._base() + [verb, *flags, *[str(f) for f in files]]
+        try:
+            p = subprocess.run(full, capture_output=True, text=True, timeout=timeout,
+                               errors="replace")
+        except FileNotFoundError:
+            return False, f"adb binary not found: {self.adb_path}"
+        except subprocess.TimeoutExpired:
+            return False, f"adb {verb} timed out"
+        out = ((p.stdout or "") + (p.stderr or "")).strip()
+        ok = p.returncode == 0 and "Failure" not in out
+        return ok, out or ("Success" if ok else f"adb {verb} failed")
 
     def apk_paths(self, pkg: str, *, timeout: float = 20.0) -> list[str]:
         """Remote APK paths (base + splits) for a package, via `pm path`."""

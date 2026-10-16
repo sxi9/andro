@@ -7,14 +7,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
+import re
+import shutil
 import time
+import uuid
 from pathlib import Path
 
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, Form, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -30,10 +35,14 @@ from ..core.store import Store
 from ..enrich.geoip import GeoIP
 from ..enrich.hostnames import HostnameCache
 from ..enrich.trackers import TrackerMatcher
+from ..service.appmanager import ONECLICK_OPS, PKG_RE, links_for
+from ..service.appdata import DB_FILE, PREF_FILE, TABLE
+from ..service.installer import BUNDLE_EXTS, MAX_UPLOAD
 
 log = logging.getLogger("sentinel.app")
 
 _STATIC = Path(__file__).parent / "static"
+_DEMO_ACTION = {"ok": False, "output": "needs a real device (not demo mode)"}
 
 # Permissions that materially raise an app's risk, short-named.
 _DANGEROUS = {
@@ -42,10 +51,6 @@ _DANGEROUS = {
     "SYSTEM_ALERT_WINDOW", "REQUEST_INSTALL_PACKAGES", "QUERY_ALL_PACKAGES",
     "READ_PHONE_STATE", "PROCESS_OUTGOING_CALLS", "READ_EXTERNAL_STORAGE",
 }
-# where apps commonly keep logs, relative to /data/data/<pkg>
-_LOG_HINTS = ("*.log", "*.txt", "*log*", "*.trace", "*.out")
-
-
 def _risk_score(d: dict, godmode: list[str], netstat: dict) -> tuple[int, list[str]]:
     """0-100 blend of the factors a privacy-conscious owner cares about."""
     score = 0
@@ -74,35 +79,9 @@ def _risk_score(d: dict, godmode: list[str], netstat: dict) -> tuple[int, list[s
 
 
 def _inspect_app_storage(dctx, pkg: str) -> dict:
-    """Where one app keeps its data, and its log-like files. Root, on demand."""
-    adb = dctx.adb
-    from ..parsers.storage import parse_du_k, parse_ls_la
-    data_dir = f"/data/data/{pkg}"
-    ext_dir = f"/sdcard/Android/data/{pkg}"
-    try:
-        sizes = parse_du_k(adb.du_sizes([data_dir, ext_dir, f"{data_dir}/cache",
-                                         f"{data_dir}/databases", f"{data_dir}/shared_prefs",
-                                         f"{data_dir}/files"]))
-    except AdbError:
-        sizes = {}
-    try:
-        listing = [e.to_dict() for e in parse_ls_la(adb.list_dir(data_dir))]
-    except AdbError:
-        listing = []
-    try:
-        log_out = adb.find_files(data_dir, list(_LOG_HINTS), limit=100)
-        logs = [ln.strip() for ln in log_out.splitlines() if ln.strip()]
-    except AdbError:
-        logs = []
-    return {
-        "package": pkg, "data_dir": data_dir, "external_dir": ext_dir,
-        "sizes": sizes, "entries": listing, "log_files": logs,
-        "subdirs": {
-            "files": f"{data_dir}/files", "cache": f"{data_dir}/cache",
-            "databases": f"{data_dir}/databases", "shared_prefs": f"{data_dir}/shared_prefs",
-            "code_cache": f"{data_dir}/code_cache", "external": ext_dir,
-        },
-    }
+    """Where one app keeps its data (lives in service.appdata now)."""
+    from ..service.appdata import storage
+    return storage(dctx, pkg)
 
 
 def _list_files(dctx, path: str) -> dict:
@@ -210,7 +189,178 @@ def _demo_app_detail(pkg: str) -> dict:
                                  "app": 44 * 1024 * 1024},
         "apk_paths": [f"/data/app/~~x/{pkg}-y/base.apk"],
         "users_installed": [0],
+        "state": {"installed": True, "hidden": False, "suspended": False, "stopped": False,
+                  "enabled_state": 0, "frozen": None, "user": 0},
+        "perm_flags": {"android.permission.CAMERA": ["USER_SET", "USER_SENSITIVE_WHEN_GRANTED"],
+                       "android.permission.RECORD_AUDIO": ["USER_SET", "USER_FIXED"]},
+        "uid": 10155, "shared_user": None, "process": pkg,
+        "data_usage": {"wifi_rx": 182_400_000, "wifi_tx": 21_300_000,
+                       "mobile_rx": 9_800_000, "mobile_tx": 2_100_000},
+        "running": {"pids": [4711, 4790], "rss_kb": 186_432},
+        "links": links_for(pkg),
     }
+
+
+def _demo_root() -> dict:
+    return {"demo": True, "root": True, "su_path": "/debug_ramdisk/su",
+            "manager": {"name": "Magisk", "version": "27.0:MAGISK:R (27000)"},
+            "adbd_root": False, "selinux": "Enforcing", "use_su": True}
+
+
+def _demo_controls(pkg: str) -> dict:
+    return {"demo": True, "battery_whitelisted": pkg == "com.whatsapp",
+            "net_restricted_background": pkg == "com.wx.weatherpro", "data_saver": False,
+            "sensors": "active", "denylist": pkg == "com.android.vending",
+            "denylist_available": True,
+            "app_links": [{"domain": f"{pkg.split('.')[1] if '.' in pkg else pkg}.com",
+                           "state": "verified"},
+                          {"domain": "links.example.org", "state": "none"}],
+            "app_links_allowed": True, "firewall_blocked": False,
+            "overlays": [{"name": f"{pkg}.overlay.theme", "enabled": True},
+                         {"name": f"{pkg}.overlay.icons", "enabled": False}],
+            "ssaid": "3f9a1c2e7b4d6a80", "keystore_files": 2, "errors": {}}
+
+
+def _demo_storage(pkg: str) -> dict:
+    base = f"/data/app/~~x/{pkg}-y"
+    return {**_demo_app_storage(pkg), "demo": True,
+            "obb_dir": f"/sdcard/Android/obb/{pkg}", "media_dir": f"/sdcard/Android/media/{pkg}",
+            "de_dir": f"/data/user_de/0/{pkg}", "cache_bytes": 12 * 1024 * 1024,
+            "data_bytes": 48 * 1024 * 1024, "app_bytes": 44 * 1024 * 1024,
+            "apk_paths": [f"{base}/base.apk", f"{base}/split_config.arm64_v8a.apk"],
+            "splits": [{"path": f"{base}/base.apk", "size": 36 * 1024 * 1024},
+                       {"path": f"{base}/split_config.arm64_v8a.apk", "size": 8 * 1024 * 1024}],
+            "backups": [{"name": f"{pkg}_20261001-100000", "path": f"~/.android-sentinel/backups/demo-pixel7/{pkg}_20261001-100000",
+                         "bytes": 52 * 1024 * 1024, "captured": "20261001-100000",
+                         "components": ["apk", "data"]}]}
+
+
+def _demo_component(name: str, kind: str, tracker: str | None = None, exported: bool = False) -> dict:
+    c = {"name": name, "exported": exported, "permission": None, "enabled": True,
+         "process": None, "tracker": tracker}
+    if kind == "provider":
+        return {**c, "authorities": [name.lower()], "grant_uri_permissions": False}
+    return {**c, "launch_mode": "standard" if kind == "activity" else None,
+            "intent_filters": ([{"actions": ["android.intent.action.MAIN"],
+                                 "categories": ["android.intent.category.LAUNCHER"], "data": []}]
+                               if name.endswith("MainActivity") else [])}
+
+
+def _demo_manifest(pkg: str) -> dict:
+    base = f"/data/app/~~x/{pkg}-y/base.apk"
+    return {
+        "demo": True, "package": pkg, "version_name": "2.26.4", "version_code": 271024,
+        "min_sdk": 24, "target_sdk": 34, "max_sdk": None, "main_activity": f"{pkg}.MainActivity",
+        "debuggable": False, "allow_backup": False, "test_only": False,
+        "uses_cleartext_traffic": True, "large_heap": True, "multidex": True,
+        "activities": [_demo_component(f"{pkg}.MainActivity", "activity", exported=True),
+                       _demo_component("com.google.android.gms.ads.AdActivity", "activity",
+                                       "Google AdMob", exported=True)],
+        "services": [_demo_component(f"{pkg}.SyncService", "service"),
+                     _demo_component("com.google.firebase.messaging.FirebaseMessagingService",
+                                     "service", "Google Firebase Analytics", exported=True)],
+        "receivers": [_demo_component("com.facebook.CampaignTrackingReceiver", "receiver",
+                                      "Facebook Analytics", exported=True)],
+        "providers": [_demo_component(f"{pkg}.FileProvider", "provider")],
+        "uses_permissions": [{"name": "android.permission.INTERNET", "max_sdk": None, "dangerous": False},
+                             {"name": "android.permission.CAMERA", "max_sdk": None, "dangerous": True},
+                             {"name": "android.permission.RECORD_AUDIO", "max_sdk": None, "dangerous": True},
+                             {"name": "android.permission.READ_CONTACTS", "max_sdk": None, "dangerous": True}],
+        "declared_permissions": [{"name": f"{pkg}.permission.C2D_MESSAGE", "protection_level": "signature"}],
+        "features": [{"name": "android.hardware.camera", "required": False}],
+        "libraries": [{"name": "org.apache.http.legacy", "required": False}],
+        "native_libs": [{"abi": "arm64-v8a", "files": ["libapp.so", "libsqlcipher.so"]}],
+        "dex_files": ["classes.dex", "classes2.dex", "classes3.dex"],
+        "meta_data": {"com.google.android.gms.version": "12451000",
+                      "firebase_analytics_collection_enabled": "true"},
+        "splits": [{"path": base, "size": 36 * 1024 * 1024}],
+        "signatures": [{"scheme": "v2", "subject": f"CN={pkg}, O=Demo Corp, C=US",
+                        "issuer": f"CN={pkg}, O=Demo Corp, C=US", "serial": "4f3a2b1c",
+                        "not_before": "2019-03-01 00:00:00", "not_after": "2049-03-01 00:00:00",
+                        "sha256": "6a8b96e2" * 8, "sha1": "6a8b96e2" * 5, "md5": "6a8b96e2" * 4,
+                        "algorithm": "SHA256withRSA"}],
+        "manifest_xml": (f'<manifest package="{pkg}" android:versionCode="271024">\n'
+                         '  <uses-permission android:name="android.permission.INTERNET"/>\n'
+                         '  <uses-permission android:name="android.permission.CAMERA"/>\n'
+                         f'  <application android:label="Demo">\n    <activity android:name="{pkg}.MainActivity" android:exported="true"/>\n'
+                         '  </application>\n</manifest>'),
+        "apk_path": base, "apk_size": 36 * 1024 * 1024, "cached": True,
+    }
+
+
+def _demo_scan(pkg: str) -> dict:
+    return {
+        "demo": True, "package": pkg,
+        "trackers": [
+            {"name": "Google AdMob", "category": "advertisement",
+             "website": "https://admob.google.com/", "signatures_matched": ["com.google.android.gms.ads."],
+             "classes": 412, "components": ["com.google.android.gms.ads.AdActivity"]},
+            {"name": "Facebook Analytics", "category": "analytics",
+             "website": "https://www.facebook.com/", "signatures_matched": ["com.facebook.appevents."],
+             "classes": 86, "components": ["com.facebook.CampaignTrackingReceiver"]},
+        ],
+        "libraries": [{"name": "OkHttp", "website": "https://square.github.io/okhttp/", "classes": 240}],
+        "native_libs": [{"abi": "arm64-v8a", "files": ["libapp.so", "libsqlcipher.so"]}],
+        "dex_files": 3, "classes_scanned": 18_420, "apk_size": 36 * 1024 * 1024,
+        "scanned_at": "2026-10-15 10:00:00", "cached": True,
+    }
+
+
+def _demo_prefs(pkg: str) -> dict:
+    return {"demo": True, "files": [{"name": f"{pkg}_preferences.xml", "size": 1480, "entries": 3}]}
+
+
+def _demo_prefs_file(file: str) -> dict:
+    return {"demo": True, "file": file,
+            "entries": [{"key": "analytics_enabled", "type": "boolean", "value": True},
+                        {"key": "user_id", "type": "string", "value": "u-48213"},
+                        {"key": "launch_count", "type": "int", "value": 42}]}
+
+
+def _demo_db() -> dict:
+    return {"demo": True, "files": [{"name": "app.db", "size": 245_760}]}
+
+
+def _demo_db_file(file: str, table: str | None, limit: int) -> dict:
+    tables = [{"name": "messages", "rows": 1240}, {"name": "contacts", "rows": 38}]
+    columns: list[str] = []
+    rows: list[list] = []
+    if table == "messages":
+        columns = ["id", "sender", "body", "ts"]
+        rows = [[1, "+15551234", "hi there", 1760500800], [2, "+15559876", "see you at 8", 1760504400],
+                [3, "+15551234", "ok", 1760508000]]
+    elif table == "contacts":
+        columns = ["id", "name", "phone"]
+        rows = [[1, "Alice", "+15551234"], [2, "Bob", "+15559876"]]
+    return {"demo": True, "file": file, "tables": tables, "table": table if columns else None,
+            "columns": columns, "rows": rows[:limit], "truncated": False}
+
+
+def _demo_running() -> dict:
+    procs = [(4711, 680, 10155, 186_432, "S", "00:04:12", "com.whatsapp"),
+             (4790, 680, 10155, 24_100, "S", "00:00:08", "com.whatsapp:push"),
+             (3912, 680, 10091, 310_204, "S", "00:12:40", "com.android.chrome"),
+             (5120, 680, 10412, 41_800, "S", "00:00:31", "com.wx.weatherpro"),
+             (1388, 1, 1000, 98_000, "S", "01:02:03", "system_server")]
+    return {"demo": True,
+            "processes": [{"pid": p, "ppid": pp, "uid": u, "package": n.split(":")[0] if u >= 10000 else None,
+                           "name": n, "rss_kb": r, "state": s, "cputime": t}
+                          for (p, pp, u, r, s, t, n) in procs],
+            "mem": {"total_kb": 7_900_000, "avail_kb": 2_600_000,
+                    "swap_total_kb": 2_000_000, "swap_free_kb": 1_200_000}}
+
+
+def _demo_history() -> dict:
+    now = time.time()
+    return {"demo": True, "events": [
+        {"ts": now - 120, "action": "force-stop", "package": "com.wx.weatherpro", "ok": True,
+         "output": "(done)", "user": 0, "params": {}},
+        {"ts": now - 3600, "action": "revoke", "package": "com.led.qrflash", "ok": True,
+         "output": "(done)", "user": 0, "params": {"permission": "android.permission.READ_SMS"}},
+        {"ts": now - 7200, "action": "freeze", "package": "com.android.chrome", "ok": False,
+         "output": "Error: Shell cannot change component state", "user": 0,
+         "params": {"method": "disable"}},
+    ]}
 
 
 _DEMO_USERS = [{"id": 0, "name": "Owner", "running": True},
@@ -581,12 +731,21 @@ def create_app(cfg: Config) -> FastAPI:
         dctx = _dev(device)
         return (dctx.state.get("storage") if dctx else None) or {"apps": {}, "totals": {}}
 
+    async def _get(fn, *a):
+        """Run a blocking read in a thread; device-side failures are 400s."""
+        try:
+            return await asyncio.to_thread(fn, *a)
+        except (AdbError, ValueError, OSError, RuntimeError) as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
     @app.get("/api/storage/app/{pkg}")
     async def storage_app(pkg: str, device: str | None = None):
+        if not PKG_RE.match(pkg):
+            return JSONResponse({"error": "invalid package name"}, status_code=400)
         dctx = _dev(device)
         if dctx is None or dctx.adb is None:
-            return {"demo": True, **_demo_app_storage(pkg)}
-        return await asyncio.to_thread(_inspect_app_storage, dctx, pkg)
+            return _demo_storage(pkg)
+        return await _get(_inspect_app_storage, dctx, pkg)
 
     @app.get("/api/files")
     async def files(path: str = "/sdcard", device: str | None = None):
@@ -607,11 +766,7 @@ def create_app(cfg: Config) -> FastAPI:
                              {"apk": bool(body.get("apk", True)),
                               "data": bool(body.get("data", True)),
                               "external": bool(body.get("external", False))})
-        # track the task so it is not GC'd mid-run and is torn down on
-        # device disconnect / server shutdown
-        task = asyncio.create_task(asyncio.to_thread(backup.run, dctx, job))
-        dctx.tasks.append(task)
-        task.add_done_callback(lambda t: t in dctx.tasks and dctx.tasks.remove(t))
+        _track(dctx, asyncio.to_thread(backup.run, dctx, job))
         return {"job": job["id"], "pkg": pkg, "serial": dctx.serial, "state": job["state"]}
 
     @app.get("/api/backup/jobs")
@@ -644,7 +799,7 @@ def create_app(cfg: Config) -> FastAPI:
             uid = None
         elif user == "all":
             uid = "all"
-        elif user.isdigit() and int(user) <= 999:
+        elif re.fullmatch(r"\d{1,3}", user):  # ASCII only: str.isdigit() lets "²" through to int()
             uid = int(user)
         else:
             return JSONResponse({"error": "invalid user"}, status_code=400)
@@ -707,7 +862,9 @@ def create_app(cfg: Config) -> FastAPI:
         from ..enrich.labels import resolve_labels
         from ..service import appmanager
         data = await asyncio.to_thread(appmanager.list_apps, dctx, "all")
-        pkgs = [a["package"] for a in data.get("apps", []) if a.get("label_source") != "apk"]
+        # hand over every package: resolve_labels skips what is cached and
+        # back-fills WebAPK meta for ones labelled before meta existed
+        pkgs = [a["package"] for a in data.get("apps", [])]
 
         def progress(i: int, n: int) -> None:
             dctx.emit_threadsafe(Event(kind="log.line", severity=SEV_INFO,
@@ -715,29 +872,347 @@ def create_app(cfg: Config) -> FastAPI:
                                        data={"level": "I", "tag": "sentinel", "buffer": "sys",
                                              "labels": True, "done": i, "total": n}))
 
+        # one resolve per device at a time: a second tab (or the auto-resolve)
+        # must not start a parallel pass over the same APKs
+        running = dctx.state.get("labels_task")
+        if running is not None and not running.done():
+            return {"ok": True, "started": False, "running": True, "packages": len(pkgs)}
         task = asyncio.create_task(asyncio.to_thread(resolve_labels, dctx, pkgs, progress))
+        dctx.state["labels_task"] = task
         dctx.tasks.append(task)
         task.add_done_callback(lambda t: t in dctx.tasks and dctx.tasks.remove(t))
         return {"ok": True, "started": True, "packages": len(pkgs)}
 
+    def _bad(msg: str):
+        return JSONResponse({"error": msg}, status_code=400)
+
+    def _refuse(msg: str):
+        return JSONResponse({"ok": False, "output": msg}, status_code=400)
+
+    def _demo_refuse():
+        return JSONResponse(_DEMO_ACTION, status_code=400)
+
+    def _track(dctx, coro) -> None:
+        # keep the task alive and tear it down with the device / the server
+        task = asyncio.create_task(coro)
+        dctx.tasks.append(task)
+        task.add_done_callback(lambda t: t in dctx.tasks and dctx.tasks.remove(t))
+
     @app.get("/api/appmanager/app/{pkg}")
-    async def am_detail(pkg: str, device: str | None = None):
+    async def am_detail(pkg: str, device: str | None = None, user: int = 0):
+        if not PKG_RE.match(pkg):
+            return _bad("invalid package name")
+        if not 0 <= user <= 999:
+            return _bad("invalid user")
         dctx = _dev(device)
         if dctx is None or dctx.adb is None:
             return {"demo": True, **_demo_app_detail(pkg)}
         from ..service import appmanager
-        return await asyncio.to_thread(appmanager.app_detail, dctx, pkg)
+        return await _get(appmanager.app_detail, dctx, pkg, user)
 
     @app.post("/api/appmanager/action")
     async def am_action(body: dict):
         dctx = _dev(body.get("device"))
         if dctx is None or dctx.adb is None:
-            return JSONResponse({"ok": False, "output": "needs a real device (not demo mode)"},
-                                status_code=400)
+            return _demo_refuse()
         from ..service import appmanager
         res = await asyncio.to_thread(appmanager.run_action, dctx,
                                       str(body.get("action", "")), body)
         return res
+
+    # ---------- app manager: per-app detail data ----------
+    @app.get("/api/appmanager/app/{pkg}/controls")
+    async def am_controls(pkg: str, device: str | None = None, user: int = 0):
+        if not PKG_RE.match(pkg):
+            return _bad("invalid package name")
+        if not 0 <= user <= 999:
+            return _bad("invalid user")
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return _demo_controls(pkg)
+        from ..service import appmanager
+        return await _get(appmanager.controls, dctx, pkg, user)
+
+    @app.get("/api/appmanager/app/{pkg}/storage")
+    async def am_storage(pkg: str, device: str | None = None):
+        return await storage_app(pkg, device)
+
+    @app.get("/api/appmanager/app/{pkg}/manifest")
+    async def am_manifest(pkg: str, device: str | None = None, refresh: int = 0):
+        if not PKG_RE.match(pkg):
+            return _bad("invalid package name")
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return _demo_manifest(pkg)
+        try:
+            from ..enrich.manifest import inspect_apk
+        except ImportError:
+            return {"package": pkg, "cached": False, "error": "manifest module not available"}
+        return await _get(inspect_apk, dctx, pkg, bool(refresh))
+
+    @app.get("/api/appmanager/app/{pkg}/scan")
+    async def am_scan(pkg: str, device: str | None = None, refresh: int = 0):
+        if not PKG_RE.match(pkg):
+            return _bad("invalid package name")
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return _demo_scan(pkg)
+        try:
+            from ..enrich.manifest import scan_app
+        except ImportError:
+            return {"package": pkg, "cached": False, "error": "manifest module not available"}
+        return await _get(scan_app, dctx, pkg, bool(refresh))
+
+    @app.get("/api/appmanager/app/{pkg}/prefs")
+    async def am_prefs(pkg: str, device: str | None = None):
+        if not PKG_RE.match(pkg):
+            return _bad("invalid package name")
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return _demo_prefs(pkg)
+        from ..service import appdata
+        return await _get(appdata.prefs_list, dctx, pkg)
+
+    @app.get("/api/appmanager/app/{pkg}/prefs/{file}")
+    async def am_prefs_file(pkg: str, file: str, device: str | None = None):
+        if not PKG_RE.match(pkg):
+            return _bad("invalid package name")
+        if not PREF_FILE.match(file) or ".." in file:
+            return _bad("invalid prefs file name")
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return _demo_prefs_file(file)
+        from ..service import appdata
+        return await _get(appdata.prefs_read, dctx, pkg, file)
+
+    @app.get("/api/appmanager/app/{pkg}/db")
+    async def am_db(pkg: str, device: str | None = None):
+        if not PKG_RE.match(pkg):
+            return _bad("invalid package name")
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return _demo_db()
+        from ..service import appdata
+        return await _get(appdata.db_list, dctx, pkg)
+
+    @app.get("/api/appmanager/app/{pkg}/db/{file}")
+    async def am_db_file(pkg: str, file: str, device: str | None = None,
+                         table: str | None = None, limit: int = 200):
+        if not PKG_RE.match(pkg):
+            return _bad("invalid package name")
+        if not DB_FILE.match(file) or ".." in file:
+            return _bad("invalid database file name")
+        if table and not TABLE.match(table):
+            return _bad("invalid table name")
+        if not 1 <= limit <= 1000:
+            return _bad("limit must be 1..1000")
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return _demo_db_file(file, table or None, limit)
+        from ..service import appdata
+        return await _get(appdata.db_read, dctx, pkg, file, table or None, limit)
+
+    @app.get("/api/appmanager/running")
+    async def am_running(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return _demo_running()
+        from ..service import appdata
+        return await _get(appdata.processes, dctx)
+
+    @app.get("/api/appmanager/history")
+    async def am_history(device: str | None = None, limit: int = 200):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return _demo_history()
+        from ..service import appmanager
+        return await _get(appmanager.history, dctx, limit)
+
+    @app.get("/api/appmanager/export")
+    async def am_export(device: str | None = None, which: str = "all",
+                        user: str | None = None,
+                        fmt: str = Query(default="csv", alias="format")):
+        from ..service import appmanager
+        if fmt not in ("csv", "json", "md"):
+            return _bad("format must be csv, json or md")
+        if which not in ("all", "user", "system", "disabled", "enabled", "uninstalled"):
+            return _bad("invalid which")
+        uid: int | str | None
+        if user is None or user == "":
+            uid = None
+        elif user == "all":
+            uid = "all"
+        elif re.fullmatch(r"\d{1,3}", user):
+            uid = int(user)
+        else:
+            return _bad("invalid user")
+        dctx = _dev(device)
+        serial = "demo"
+        if dctx is None or dctx.adb is None:
+            from ..enrich.labels import label_for
+            apps = _demo_app_list()
+            for a in apps:
+                a["label"] = label_for(a["package"])
+                a["installed"] = a["package"] != _DEMO_CHROME
+            if which == "user":
+                apps = [a for a in apps if not a["system"]]
+            elif which == "system":
+                apps = [a for a in apps if a["system"]]
+            body, media, ext = appmanager.render_export(appmanager.export_rows(apps), fmt)
+        else:
+            serial = re.sub(r"[^A-Za-z0-9._-]", "_", dctx.serial)
+            try:
+                body, media, ext = await asyncio.to_thread(appmanager.export, dctx, fmt, which, uid)
+            except AdbError as e:
+                return _bad(str(e))
+        name = f"apps-{serial}-{time.strftime('%Y%m%d-%H%M%S')}.{ext}"
+        return Response(content=body, media_type=media,
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    # ---------- app manager: bulk ----------
+    @app.get("/api/appmanager/oneclick")
+    def am_oneclick_ops(device: str | None = None):
+        dctx = _dev(device)
+        return {"ops": ONECLICK_OPS, "demo": dctx is None or dctx.adb is None}
+
+    @app.post("/api/appmanager/oneclick")
+    async def am_oneclick(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import appmanager
+        try:
+            return await asyncio.to_thread(appmanager.oneclick, dctx, str(body.get("op", "")),
+                                           bool(body.get("confirm")), str(body.get("scope", "user")))
+        except AdbError as e:
+            return _refuse(str(e))
+
+    @app.post("/api/appmanager/batch")
+    async def am_batch(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import appmanager
+        try:
+            return await asyncio.to_thread(appmanager.batch, dctx, str(body.get("action", "")),
+                                           body.get("packages"), body.get("user", 0),
+                                           bool(body.get("confirm")), body.get("options") or {})
+        except AdbError as e:
+            return _refuse(str(e))
+
+    @app.post("/api/appmanager/install")
+    async def am_install(file: UploadFile = File(...), options: str = Form("{}")):
+        """Multipart upload of one .apk or an .apks/.xapk/.apkm bundle, then
+        `adb install[-multiple]` with the chosen flags."""
+        from ..service import installer
+        try:
+            opts = json.loads(options or "{}")
+        except ValueError:
+            return _refuse("options must be a JSON object")
+        if not isinstance(opts, dict):
+            return _refuse("options must be a JSON object")
+        dctx = _dev(opts.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        name = os.path.basename((file.filename or "").replace("\\", "/"))
+        ext = os.path.splitext(name)[1].lower()
+        if ext != ".apk" and ext not in BUNDLE_EXTS:
+            return _refuse("expected a .apk, .apks, .xapk or .apkm file")
+        try:
+            installer.install_flags(opts)   # user / installer validation up front
+        except AdbError as e:
+            return _refuse(str(e))
+        safe = (re.sub(r"[^A-Za-z0-9_.\-]", "_", name)[-120:] or "upload")
+        if not safe.lower().endswith(ext):
+            safe += ext
+        updir = cfg.data_dir / "uploads" / uuid.uuid4().hex
+        updir.mkdir(parents=True, exist_ok=True)
+        dest = updir / safe
+        size = 0
+        try:
+            with open(dest, "wb") as fh:
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_UPLOAD:
+                        raise ValueError("file exceeds 400 MB")
+                    fh.write(chunk)
+        except ValueError as e:
+            shutil.rmtree(updir, ignore_errors=True)
+            return _refuse(str(e))
+        finally:
+            await file.close()
+        if size == 0:
+            shutil.rmtree(updir, ignore_errors=True)
+            return _refuse("empty upload")
+        return await asyncio.to_thread(installer.install_upload, dctx, dest, opts)
+
+    @app.post("/api/restore")
+    async def restore(body: dict):
+        from ..service import installer
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        if not body.get("confirm"):
+            return _refuse("restore requires confirm=true")
+        apk, data = bool(body.get("apk", True)), bool(body.get("data", True))
+        if not apk and not data:
+            return _refuse("nothing to restore: choose apk and/or data")
+        try:
+            job = await asyncio.to_thread(installer.new_restore_job, hub, dctx,
+                                          str(body.get("name", "")), apk, data)
+        except AdbError as e:
+            return _refuse(str(e))
+        _track(dctx, asyncio.to_thread(installer.run_restore, hub, dctx, job))
+        return {"job": job["id"], "name": job["name"], "pkg": job["pkg"],
+                "serial": dctx.serial, "state": job["state"]}
+
+    # ---------- root / su ----------
+    @app.get("/api/root")
+    async def root_status(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return _demo_root()
+        from ..service import rootctl
+        return await asyncio.to_thread(rootctl.root_status, dctx)
+
+    @app.post("/api/root/request")
+    async def root_request(body: dict | None = None):
+        body = body or {}
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import rootctl
+        return await asyncio.to_thread(rootctl.request_root, dctx)
+
+    @app.post("/api/root/use")
+    async def root_use(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return _refuse("enabled must be true or false")
+        from ..service import rootctl
+        return await asyncio.to_thread(rootctl.set_use_su, dctx, enabled)
+
+    async def _adbd(body: dict | None, verb: str):
+        body = body or {}
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        ok, out = await asyncio.to_thread(getattr(dctx.adb, verb))
+        return {"ok": ok, "output": out}
+
+    @app.post("/api/adb/root")
+    async def adb_root(body: dict | None = None):
+        return await _adbd(body, "root")
+
+    @app.post("/api/adb/unroot")
+    async def adb_unroot(body: dict | None = None):
+        return await _adbd(body, "unroot")
 
     # ---------- WebSocket ----------
     @app.websocket("/ws")

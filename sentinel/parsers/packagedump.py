@@ -37,7 +37,14 @@ _INITIATING = re.compile(r"\binitiatingPackageName=([A-Za-z0-9_.]+|null)")
 _LAST_UPDATE = re.compile(r"\blastUpdateTime=([\d\- :.]+)")
 _FLAGS = re.compile(r"\b(?:pkgFlags|flags)=\[\s*([^\]]*)\]")
 _SIGS = re.compile(r"signatures=PackageSignatures\{[0-9a-fx]+\s+version:\d+,\s+signatures:\[([0-9a-fx, ]*)\]")
-_PERM_GRANT = re.compile(r"^\s*([A-Za-z0-9_.\-]+):\s+granted=(true|false)")
+_PERM_GRANT = re.compile(r"^\s*([A-Za-z0-9_.\-]+):\s+granted=(true|false)"
+                         r"(?:,\s*flags=\[\s*([^\]]*)\])?")
+# "    User 0: ceDataInode=1 installed=true hidden=false suspended=false ... enabled=0"
+_USER_STATE = re.compile(r"^\s*User (\d+):\s+(.*)$")
+_KV = re.compile(r"(\w+)=(\S+)")
+_USER_ID = re.compile(r"\b(?:userId|appId)=(\d+)")
+_SHARED_USER = re.compile(r"\bsharedUser=(?:SharedUserSetting\{\S*\s+)?([A-Za-z][A-Za-z0-9_.]*)")
+_PROCESS = re.compile(r"\bprocessName=([A-Za-z0-9_.:]+)")
 _REQ_HDR = re.compile(r"^\s*requested permissions:")
 _REQ_PERM = re.compile(r"^\s+([A-Za-z][A-Za-z0-9_.\-]+)(?::.*)?$")
 _SECTION_END = re.compile(r"^\s*(install permissions:|runtime permissions:|User \d|"
@@ -59,7 +66,9 @@ def parse_packages_dump(text: str) -> dict[str, dict[str, Any]]:
     """`dumpsys package packages` → per-package details.
 
     Returns {pkg: {version, version_name, installer, system, sig, last_update,
-                   requested: [perm], granted: [perm]}}
+                   requested: [perm], granted: [perm], users: {id: {installed,
+                   hidden, suspended, stopped, enabled_state}}, perm_flags:
+                   {perm: [flag]}, uid, shared_user, process, ...}}
     Tolerant of version drift: unknown lines are ignored.
     """
     out: dict[str, dict[str, Any]] = {}
@@ -77,12 +86,28 @@ def parse_packages_dump(text: str) -> dict[str, dict[str, Any]]:
                 "min_sdk": None, "abi": None, "enabled": True,
                 "requested": [], "granted": [],
                 "disabled_components": [], "enabled_components": [],
+                "users": {}, "perm_flags": {}, "uid": None, "shared_user": None,
+                "process": None,
             })
             in_requested = False
             in_section = None
             continue
         if cur is None:
             continue
+
+        m = _USER_STATE.match(line)
+        if m:
+            kv = dict(_KV.findall(m.group(2)))
+            try:
+                cur["users"][int(m.group(1))] = {
+                    "installed": kv.get("installed") == "true",
+                    "hidden": kv.get("hidden") == "true",
+                    "suspended": kv.get("suspended") == "true",
+                    "stopped": kv.get("stopped") == "true",
+                    "enabled_state": int(kv.get("enabled", "0") or 0),
+                }
+            except ValueError:
+                pass
 
         if in_section:
             m = _COMP.match(line)
@@ -152,8 +177,20 @@ def parse_packages_dump(text: str) -> dict[str, dict[str, Any]]:
         if m and cur["sig"] is None:
             cur["sig"] = m.group(1).replace(" ", "")
         m = _PERM_GRANT.match(line)
-        if m and m.group(2) == "true" and "permission" in m.group(1):
-            if m.group(1) not in cur["granted"]:
+        if m and "permission" in m.group(1):
+            if m.group(2) == "true" and m.group(1) not in cur["granted"]:
                 cur["granted"].append(m.group(1))
+            if m.group(3) is not None:
+                cur["perm_flags"][m.group(1)] = [f.strip() for f in m.group(3).split("|")
+                                                 if f.strip()]
+        m = _USER_ID.search(line)
+        if m and cur["uid"] is None:
+            cur["uid"] = int(m.group(1))
+        m = _SHARED_USER.search(line)
+        if m and cur["shared_user"] is None and m.group(1) != "null":
+            cur["shared_user"] = m.group(1)
+        m = _PROCESS.search(line)
+        if m and cur["process"] is None:
+            cur["process"] = m.group(1)
 
     return out

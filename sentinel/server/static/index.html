@@ -228,32 +228,112 @@
       <!-- APP MANAGER -->
       <section class="panel" data-panel="appmgr">
         <div class="am-layout">
+          <div class="am-left">
           <div class="card pad0 am-list">
-            <div class="ch"><h3>All apps</h3><span class="tiphint" data-tip="Every package on the device, system and user. Filter by type (uninstalled = debloated for this user but still on disk), pick the Android user / profile or all users, search by name or package, and click an app for full details and actions. If something is missing, search for it and use 'Search every user and the file system'.">?</span>
+            <div class="ch"><h3>All apps</h3><span class="tiphint" data-tip="Every package on the device, system and user. Filter by type (uninstalled = debloated for this user but still on disk; running / frozen are computed from the live process list and the enabled state), pick the Android user / profile or all users, search by name or package, and click an app for full details and actions. Tick the boxes to act on several apps at once. If something is missing, search for it and use 'Search every user and the file system'.">?</span>
               <div class="chips-filter" id="am-filter">
                 <button class="on" data-which="all">all</button>
                 <button data-which="user">user</button>
                 <button data-which="system">system</button>
                 <button data-which="disabled">disabled</button>
                 <button data-which="uninstalled" title="Apps removed for this user (debloated) but still on the device; they can be reinstalled">uninstalled</button>
+                <button data-local="running" title="Apps with a live process right now">running</button>
+                <button data-local="frozen" title="Apps that are disabled (frozen) for this user">frozen</button>
               </div>
               <select id="am-user" class="devpick" style="margin-left:0;display:none" title="Android user / profile" aria-label="Android user"></select>
             </div>
             <div class="toolbar">
               <input id="am-search" type="search" placeholder="Search by name or package…" autocomplete="off">
+              <select id="am-sort" aria-label="Sort apps" title="Sort the list">
+                <option value="name">sort: name</option>
+                <option value="package">sort: package</option>
+                <option value="data">sort: data size</option>
+                <option value="apk">sort: APK size</option>
+                <option value="source">sort: label source</option>
+              </select>
               <button class="btn" id="am-resolve" title="Read each app's real name from its APK (manifest + resources only, fast). Runs automatically the first time a device's list opens; press to run it again. Needs pip install pyaxmlparser on this computer.">Resolve names</button>
+              <select id="am-export" aria-label="Export the app list" title="Download the current list (filter + user) as a file">
+                <option value="">export…</option>
+                <option value="csv">CSV</option>
+                <option value="json">JSON</option>
+                <option value="md">Markdown</option>
+              </select>
+              <button class="btn p" id="am-install-btn" title="Sideload an APK, or a split bundle (.apks / .xapk / .apkm), from this computer">Install APK</button>
             </div>
-            <div id="am-count" class="hint" style="padding:6px 15px;border-bottom:1px solid var(--border-soft)"></div>
+            <div class="am-countbar">
+              <span id="am-count" class="hint"></span>
+              <span class="pill mut am-rootchip" id="am-rootchip" title="Whether actions run with su on this device; click for the Devices tab">root: ?</span>
+              <span class="am-sellinks"><span class="am-sellink" id="am-selall">select all shown</span> · <span class="am-sellink" id="am-selnone">clear</span></span>
+            </div>
+            <div class="am-bulk" id="am-bulk" style="display:none">
+              <div class="am-bulk-head"><b id="am-bulk-n">0 selected</b><span class="hint">actions run one app at a time, in order</span></div>
+              <div class="am-bulk-row">
+                <button class="btn" data-batch="force-stop">Force stop</button>
+                <span class="am-group"><button class="btn danger" data-batch="freeze">Freeze</button>
+                  <select id="am-bulk-freeze" title="How to freeze: disable (pm disable-user), suspend (pm suspend) or hide (pm hide)"><option value="disable">disable</option><option value="suspend">suspend</option><option value="hide">hide</option></select></span>
+                <button class="btn" data-batch="unfreeze">Unfreeze</button>
+                <button class="btn" data-batch="clear-cache">Clear cache</button>
+                <button class="btn danger" data-batch="clear-data">Clear data</button>
+                <span class="am-group"><button class="btn danger" data-batch="uninstall">Uninstall</button>
+                  <label class="am-cklabel" title="pm uninstall -k: keep the data and cache directories"><input type="checkbox" id="am-bulk-keep"> keep data</label></span>
+                <button class="btn" data-batch="reinstall" title="Reinstall for this user from the copy still on the device">Reinstall</button>
+              </div>
+              <div class="am-bulk-row">
+                <button class="btn" data-batch="prevent-background" data-enabled="true" title="appops RUN_IN_BACKGROUND + RUN_ANY_IN_BACKGROUND = ignore">Prevent background</button>
+                <button class="btn" data-batch="prevent-background" data-enabled="false" title="Allow background work again">Allow background</button>
+                <button class="btn danger" data-batch="appops-deny-dangerous" title="Set the dangerous app ops (location, camera, mic, contacts, SMS, clipboard…) to ignore">Deny dangerous app ops</button>
+                <button class="btn" data-batch="battery" data-whitelist="true" title="dumpsys deviceidle whitelist +pkg">Battery: no optimisation</button>
+                <button class="btn" data-batch="battery" data-whitelist="false" title="dumpsys deviceidle whitelist -pkg">Battery: optimise</button>
+                <button class="btn" data-batch="netpolicy" data-restrict_background="true" title="cmd netpolicy restrict-background-blacklist">Restrict background data</button>
+                <button class="btn" data-batch="netpolicy" data-restrict_background="false">Allow background data</button>
+              </div>
+              <div class="am-bulk-row">
+                <button class="btn" data-batch="save-apk" title="Pull every APK of each app to this computer">Save APK</button>
+                <button class="btn" data-batch="backup" title="APK + private data to this computer (data needs root)">Backup (APK+data)</button>
+                <button class="btn danger" data-batch="block-trackers" title="Needs a scan of each app first (Scanner tab); blocks the tracker components with IFW + pm disable">Block trackers</button>
+                <button class="btn danger" data-batch="unblock-trackers">Unblock trackers</button>
+                <button class="btn" data-batch="compile" data-mode="speed" title="pm compile -m speed -f">Compile: speed</button>
+                <button class="btn" data-batch="compile" data-mode="reset" title="pm compile --reset">Compile: reset</button>
+              </div>
+              <div id="am-bulk-results"></div>
+            </div>
             <div class="applist" id="am-applist" style="max-height:620px"><div class="empty">loading apps…</div></div>
+          </div>
+          <div class="card pad0" id="am-oneclick-card">
+            <div class="ch"><h3>1-click ops</h3><span class="tiphint" data-tip="Device-wide operations over every user app (or every app except the core system). Destructive ones ask first. Each runs the matching per-app action in order and reports per package.">?</span><span class="hint">whole device, one press</span></div>
+            <div id="am-oneclick"><div class="empty">loading…</div></div>
+          </div>
           </div>
           <div class="card pad0 am-detail" id="am-detail">
             <div class="ch"><h3 id="am-dtitle">App details</h3><span class="hint" id="am-dsub">select an app</span></div>
+            <div class="am-tabs" id="am-tabs" style="display:none"></div>
             <div id="am-dbody"><div class="empty">Pick an app on the left to see its permissions, components, app-ops, signature and storage, and to manage it.</div></div>
           </div>
         </div>
         <div class="note">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
-          <span>Actions run on the selected device over your own ADB. Disable, Clear data and Uninstall change the device and ask for confirmation first. Everything stays local.</span>
+          <span>Actions run on the selected device over your own ADB. Anything that removes data, freezes or blocks an app asks for confirmation first. Root-only actions say so and need "Use root for actions" in the Devices tab. Everything stays local.</span>
+        </div>
+        <div class="modal" id="am-install-modal" style="display:none" role="dialog" aria-label="Install APK">
+          <div class="modal-box">
+            <div class="ch"><h3>Install APK</h3><button class="btn" id="am-install-close" aria-label="Close">close</button></div>
+            <div class="modal-body">
+              <p class="hint">One .apk, or a split bundle (.apks / .xapk / .apkm: only the APK entries inside are used). Max 400 MB. The file is uploaded to this computer's sentinel data dir, installed with adb install, then deleted.</p>
+              <input type="file" id="am-install-file" accept=".apk,.apks,.xapk,.apkm">
+              <div class="am-install-opts">
+                <label class="am-cklabel"><input type="checkbox" id="am-inst-replace" checked> replace existing (-r)</label>
+                <label class="am-cklabel"><input type="checkbox" id="am-inst-downgrade"> allow downgrade (-d)</label>
+                <label class="am-cklabel"><input type="checkbox" id="am-inst-grant"> grant all permissions (-g)</label>
+                <label class="am-cklabel"><input type="checkbox" id="am-inst-test"> allow test APKs (-t)</label>
+                <label class="am-cklabel">user <select id="am-inst-user"><option value="">current</option></select></label>
+              </div>
+              <div class="am-bulk-row" style="padding:0">
+                <button class="btn p" id="am-install-go">Install</button>
+                <span class="hint" id="am-install-state"></span>
+              </div>
+              <pre class="am-out" id="am-install-out" style="display:none"></pre>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -350,6 +430,11 @@
         <div class="card pad0" style="margin-top:14px">
           <div class="ch"><h3>Devices</h3><span class="hint">live state, with what to do about it</span></div>
           <div id="devlist"><div class="empty">scanning for devices…</div></div>
+        </div>
+
+        <div class="card pad0" style="margin-top:14px" id="root-card">
+          <div class="ch"><h3>Root / su</h3><span class="tiphint" data-tip="Whether this device grants su to the shell, which root manager provides it, and whether App Manager actions run through su. 'Request su' triggers the manager's grant prompt on the phone. 'adb root' restarts adbd as root on userdebug / custom ROMs only; production builds refuse it.">?</span><span class="hint">per monitored device</span></div>
+          <div id="root-body"><div class="empty">checking root…</div></div>
         </div>
 
         <div class="cols" style="margin-top:14px">

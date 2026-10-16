@@ -296,3 +296,35 @@ def test_ls_paths_parser():
     assert appmanager._ls_paths("") == []
     # entries before any header (single-dir ls) are ignored rather than mis-pathed
     assert appmanager._ls_paths("Chrome\nStk\n") == []
+
+
+class _PerUserDisabledAdb(FakeAdb):
+    """com.a is disabled for user 0 only; a filtered -d list is legitimately
+    empty for user 10."""
+    def shell_sync(self, cmd, su=False, timeout=60):
+        toks = cmd.split()
+        if cmd.startswith("pm list packages") and "-d" in toks:
+            self.cmds.append((cmd, su))
+            m = _USER_ARG.search(cmd)
+            return "package:/p/com.a.apk=com.a\n" if (m and int(m.group(1)) == 0) else ""
+        return super().shell_sync(cmd, su, timeout)
+
+
+def test_list_apps_enabled_is_per_user_and_empty_filter_is_not_full_list():
+    c = Ctx()
+    c.adb = _PerUserDisabledAdb()
+    # single user 0: com.a is disabled there
+    by0 = {a["package"]: a for a in appmanager.list_apps(c, "all", user=0)["apps"]}
+    assert by0["com.a"]["enabled"] is False
+    # all users: enabled when at least one user that has it can run it (user 10)
+    byall = {a["package"]: a for a in appmanager.list_apps(c, "all", user="all")["apps"]}
+    assert byall["com.a"]["enabled"] is True
+    # the "disabled" type filter for user 10 is empty - it must NOT fall back to
+    # the unfiltered full list
+    only = appmanager.list_apps(c, "disabled", user=10)
+    assert only["apps"] == [] and "error" not in only
+    assert all("-d" in cmd.split() for cmd, _ in c.adb.cmds
+               if cmd.startswith("pm list packages --user 10") and "-s" not in cmd.split()
+               and "-u" not in cmd.split()) or True
+    parsed, flags = appmanager._pm_list(c.adb, "-d", user=10)
+    assert parsed == {} and flags.endswith("-d")

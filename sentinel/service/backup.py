@@ -35,7 +35,7 @@ class BackupService:
         with self._lock:
             self._seq += 1
             jid = self._seq
-        job = {"id": jid, "pkg": pkg, "serial": serial, "state": "running",
+        job = {"id": jid, "pkg": pkg, "serial": serial, "state": "running", "type": "backup",
                "started": time.time(), "finished": None, "steps": [], "path": None,
                "error": None, "bytes": 0, **opts}
         self.jobs[jid] = job

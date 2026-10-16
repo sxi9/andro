@@ -125,8 +125,9 @@ def _hash_like(seg: str) -> bool:
         return True
     if len(s) >= 10 and set(s) <= _HEX:
         return True
-    # mostly-digit tokens; short ones like "mp3" or "x264" are real words
-    return len(s) >= 6 and sum(c.isdigit() for c in s) / len(s) >= 0.4
+    # long tokens that are mostly digits (build ids); shorter ones like "mp3",
+    # "x264", "game2048" or "pes2023" are real words
+    return len(s) >= 12 and sum(c.isdigit() for c in s) / len(s) >= 0.5
 
 
 def friendly_name(pkg: str) -> str:

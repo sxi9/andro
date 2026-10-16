@@ -61,8 +61,15 @@ class DeviceContext:
         self.adb: AdbClient | None = None
         self.maps: DeviceMaps | None = None
         if not demo:
-            self.adb = AdbClient(adb_path=hub.cfg.adb_path, serial=serial,
-                                 use_su=hub.cfg.use_su)
+            # the owner's per-device su toggle (POST /api/root/use) outlives --no-su
+            use_su = hub.cfg.use_su
+            try:
+                saved = hub.store.get_snapshot(f"{serial}:use_su")
+            except Exception:  # noqa: BLE001 - a broken store never blocks attach
+                saved = None
+            if isinstance(saved, bool):
+                use_su = saved
+            self.adb = AdbClient(adb_path=hub.cfg.adb_path, serial=serial, use_su=use_su)
             self.maps = DeviceMaps(self.adb)
         self.rules = RulesEngine(egress_spike_mb_per_min=hub.cfg.egress_spike_mb_per_min)
         self.rules.apply_enabled_map(hub.store.get_snapshot("rules_enabled") or {})

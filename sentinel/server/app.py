@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -380,6 +381,21 @@ def _probe_resolver() -> bool:
 # probed once at import: the import pulls in lxml and would otherwise run on
 # the event loop inside the first list request
 _CAN_RESOLVE = _probe_resolver()
+
+
+def _probe_multipart() -> bool:
+    try:
+        import multipart  # noqa: F401  (python-multipart)
+        return True
+    except ImportError:
+        try:
+            import python_multipart  # noqa: F401  (newer package name)
+            return True
+        except ImportError:
+            return False
+
+
+_HAS_MULTIPART = _probe_multipart()
 
 
 def _can_resolve() -> bool:
@@ -1113,54 +1129,64 @@ def create_app(cfg: Config) -> FastAPI:
         except AdbError as e:
             return _refuse(str(e))
 
-    @app.post("/api/appmanager/install")
-    async def am_install(file: UploadFile = File(...), options: str = Form("{}")):
-        """Multipart upload of one .apk or an .apks/.xapk/.apkm bundle, then
-        `adb install[-multiple]` with the chosen flags."""
-        from ..service import installer
-        try:
-            opts = json.loads(options or "{}")
-        except ValueError:
-            return _refuse("options must be a JSON object")
-        if not isinstance(opts, dict):
-            return _refuse("options must be a JSON object")
-        dctx = _dev(opts.get("device"))
-        if dctx is None or dctx.adb is None:
-            return _demo_refuse()
-        name = os.path.basename((file.filename or "").replace("\\", "/"))
-        ext = os.path.splitext(name)[1].lower()
-        if ext != ".apk" and ext not in BUNDLE_EXTS:
-            return _refuse("expected a .apk, .apks, .xapk or .apkm file")
-        try:
-            installer.install_flags(opts)   # user / installer validation up front
-        except AdbError as e:
-            return _refuse(str(e))
-        safe = (re.sub(r"[^A-Za-z0-9_.\-]", "_", name)[-120:] or "upload")
-        if not safe.lower().endswith(ext):
-            safe += ext
-        updir = cfg.data_dir / "uploads" / uuid.uuid4().hex
-        updir.mkdir(parents=True, exist_ok=True)
-        dest = updir / safe
-        size = 0
-        try:
-            with open(dest, "wb") as fh:
-                while True:
-                    chunk = await file.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    if size > MAX_UPLOAD:
-                        raise ValueError("file exceeds 400 MB")
-                    fh.write(chunk)
-        except ValueError as e:
-            shutil.rmtree(updir, ignore_errors=True)
-            return _refuse(str(e))
-        finally:
-            await file.close()
-        if size == 0:
-            shutil.rmtree(updir, ignore_errors=True)
-            return _refuse("empty upload")
-        return await asyncio.to_thread(installer.install_upload, dctx, dest, opts)
+    if _HAS_MULTIPART:
+        @app.post("/api/appmanager/install")
+        async def am_install(file: UploadFile = File(...), options: str = Form("{}")):
+            """Multipart upload of one .apk or an .apks/.xapk/.apkm bundle, then
+            `adb install[-multiple]` with the chosen flags."""
+            from ..service import installer
+            try:
+                opts = json.loads(options or "{}")
+            except ValueError:
+                return _refuse("options must be a JSON object")
+            if not isinstance(opts, dict):
+                return _refuse("options must be a JSON object")
+            dctx = _dev(opts.get("device"))
+            if dctx is None or dctx.adb is None:
+                return _demo_refuse()
+            name = os.path.basename((file.filename or "").replace("\\", "/"))
+            ext = os.path.splitext(name)[1].lower()
+            if ext != ".apk" and ext not in BUNDLE_EXTS:
+                return _refuse("expected a .apk, .apks, .xapk or .apkm file")
+            try:
+                installer.install_flags(opts)   # user / installer validation up front
+            except AdbError as e:
+                return _refuse(str(e))
+            safe = (re.sub(r"[^A-Za-z0-9_.\-]", "_", name)[-120:] or "upload")
+            if not safe.lower().endswith(ext):
+                safe += ext
+            updir = cfg.data_dir / "uploads" / uuid.uuid4().hex
+            updir.mkdir(parents=True, exist_ok=True)
+            dest = updir / safe
+            size = 0
+            try:
+                with open(dest, "wb") as fh:
+                    while True:
+                        chunk = await file.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > MAX_UPLOAD:
+                            raise ValueError("file exceeds 400 MB")
+                        fh.write(chunk)
+            except ValueError as e:
+                shutil.rmtree(updir, ignore_errors=True)
+                return _refuse(str(e))
+            finally:
+                await file.close()
+            if size == 0:
+                shutil.rmtree(updir, ignore_errors=True)
+                return _refuse("empty upload")
+            return await asyncio.to_thread(installer.install_upload, dctx, dest, opts)
+
+    else:
+        @app.post("/api/appmanager/install")
+        async def am_install_unavailable():
+            # FastAPI needs python-multipart to parse uploads; the rest of the
+            # dashboard keeps working on a venv that predates it
+            return _refuse("installing APKs needs the python-multipart package on this computer: "
+                           "run install.ps1 / install.sh again, or "
+                           f"{sys.executable} -m pip install -r requirements.txt")
 
     @app.post("/api/restore")
     async def restore(body: dict):

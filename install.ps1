@@ -61,11 +61,13 @@ real device (demo mode works without it). Get it:
 Say "done."
 Write-Host @"
 
-Run it (from the checkout folder):
+Run it (from the checkout folder; run.cmd also installs anything a
+`git pull` added to requirements.txt before starting):
   cd "$Dir"
-  & "$python" -m sentinel --demo     # simulated device, try the UI
-  & "$python" -m sentinel            # phone on USB debugging
-  & "$python" -m sentinel -s IP:PORT # wireless debugging
+  run.cmd --demo        # simulated device, try the UI
+  run.cmd               # phone on USB debugging
+  run.cmd -s IP:PORT    # wireless debugging
+  (same thing by hand: & "$python" -m sentinel ...)
 
 Dashboard: http://127.0.0.1:8765  (local-only by design)
 "@

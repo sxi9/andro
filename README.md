@@ -20,6 +20,10 @@ web UI binds to `127.0.0.1` by default.
 ## Quick start
 
 ```bash
+# Windows: powershell -ExecutionPolicy Bypass -File install.ps1   (then run.cmd)
+# Linux/macOS: ./install.sh                                         (then ./run.sh)
+# The run.* launchers use the installer's venv and install anything a
+# `git pull` added to requirements.txt before starting. By hand:
 pip install -r requirements.txt
 
 # try it with a simulated device first (no phone needed):

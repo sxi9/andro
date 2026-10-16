@@ -75,11 +75,13 @@ fi
 say "done."
 cat <<EOT
 
-Run it (from the checkout folder):
+Run it (from the checkout folder; run.sh also installs anything a
+git pull added to requirements.txt before starting):
   cd "$DIR"
-  "$PY" -m sentinel --demo     # simulated device, try the UI
-  "$PY" -m sentinel            # phone on USB debugging
-  "$PY" -m sentinel -s IP:PORT # wireless debugging
+  ./run.sh --demo        # simulated device, try the UI
+  ./run.sh               # phone on USB debugging
+  ./run.sh -s IP:PORT    # wireless debugging
+  (same thing by hand: "$PY" -m sentinel ...)
 
 Dashboard: http://127.0.0.1:8765  (local-only by design)
 EOT

@@ -5,6 +5,25 @@ import logging
 import sys
 
 
+_REQUIRED = {           # import name -> pip name (requirements.txt)
+    "fastapi": "fastapi",
+    "uvicorn": "uvicorn[standard]",
+    "multipart": "python-multipart",
+    "pyaxmlparser": "pyaxmlparser",
+}
+
+
+def _missing_deps() -> list[str]:
+    import importlib.util
+    out = []
+    for mod, pip_name in _REQUIRED.items():
+        if importlib.util.find_spec(mod) is None:
+            if mod == "multipart" and importlib.util.find_spec("python_multipart") is not None:
+                continue   # newer releases also ship under this name
+            out.append(pip_name)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -13,6 +32,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     from .config import parse_args
     cfg = parse_args(argv)
+
+    missing = _missing_deps()
+    if missing:
+        # a `git pull` can add requirements; say exactly what to run with the
+        # same interpreter that is running us (pip is rarely on PATH on Windows)
+        print(f"Missing Python packages: {', '.join(missing)}\n"
+              f"Install them with:\n  \"{sys.executable}\" -m pip install -r requirements.txt\n"
+              f"(or run install.ps1 / install.sh again)", file=sys.stderr)
+        return 2
 
     if not cfg.demo:
         from .adb.client import AdbClient

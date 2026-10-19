@@ -199,6 +199,57 @@ def _to_csv(rows: list[dict]) -> bytes:
 
 # ---------------- watches ----------------
 
+def replay(hub, spec: dict) -> dict:
+    """Repeater: send an (edited) HTTP request and return the response. When a
+    mitmproxy is running we route through it so the replay is re-captured, just
+    like Reqable's resend. Host-side only (does not touch the device)."""
+    import urllib.request
+    import urllib.error
+    url = str((spec or {}).get("url", "")).strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return {"ok": False, "output": "url must start with http:// or https://"}
+    method = str((spec or {}).get("method", "GET")).upper()
+    if method not in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+        return {"ok": False, "output": "unsupported method"}
+    headers = {str(k): str(v) for k, v in (spec.get("headers") or {}).items()}
+    body = spec.get("body")
+    data = body.encode() if isinstance(body, str) and body else None
+
+    handlers = []
+    try:
+        from . import mitm
+        st = mitm.status(hub)
+        if spec.get("through_proxy", True) and st.get("running") and st.get("port"):
+            p = f"http://127.0.0.1:{st['port']}"
+            handlers.append(urllib.request.ProxyHandler({"http": p, "https": p}))
+    except Exception:  # noqa: BLE001
+        pass
+    # replaying to a cert minted by our own CA: allow the proxy's leaf cert
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    opener = urllib.request.build_opener(*handlers)
+
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    t0 = time.time()
+    try:
+        resp = opener.open(req, timeout=30)
+        raw = resp.read(256 * 1024)
+        return {"ok": True, "status": resp.status,
+                "headers": dict(resp.headers), "bytes": len(raw),
+                "body_preview": raw[:8192].decode("utf-8", "replace"),
+                "duration_ms": int((time.time() - t0) * 1000)}
+    except urllib.error.HTTPError as e:
+        raw = e.read(256 * 1024) if hasattr(e, "read") else b""
+        return {"ok": True, "status": e.code, "headers": dict(e.headers or {}),
+                "bytes": len(raw), "body_preview": raw[:8192].decode("utf-8", "replace"),
+                "duration_ms": int((time.time() - t0) * 1000)}
+    except Exception as e:  # noqa: BLE001 - network/TLS/proxy errors
+        return {"ok": False, "output": f"replay failed: {e}"}
+
+
 def list_watches(dctx) -> list[dict]:
     return dctx.store.get_snapshot(_WATCHES) or []
 

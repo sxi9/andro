@@ -2590,7 +2590,48 @@
     loadEngagement();
     loadFridaCard();
     loadMitmCard();
+    loadBuiltinCa();
   }
+
+  /* ===== built-in CA + one-click setup (self-contained, like Reqable) ===== */
+  function loadBuiltinCa() {
+    getJSON("/api/intercept/ca/builtin").then(function (d) {
+      var st = $("#oc-castate");
+      if (st) st.textContent = d.exists
+        ? ("built-in CA ready · " + (d.subject || "Sentinel Proxy CA"))
+        : "no built-in CA yet — Set up or Generate to create one";
+    }).catch(function () {});
+  }
+  (function initOneClick() {
+    function on(id, fn) { var e = $("#" + id); if (e) e.addEventListener("click", fn); }
+    on("oc-gen", function () {
+      if (typeof confirm === "function" &&
+          !confirm("Generate a new Sentinel CA? Any previously installed Sentinel CA stops being trusted until you install the new one.")) return;
+      postJSON("/api/intercept/ca/builtin/generate", { force: true }).then(function (r) {
+        toast("built-in CA generated", "good"); loadBuiltinCa();
+        if (r && r.sha256) { var o = $("#oc-out"); if (o) { o.style.display = ""; o.textContent = "CA: " + (r.subject || "") + "\nsha256 " + r.sha256; } }
+      }).catch(function () { toast("could not generate CA", "warn"); });
+    });
+    on("oc-setup", function () {
+      if (typeof confirm === "function" &&
+          !confirm("Set up interception on this device? This installs Sentinel's CA, starts the proxy, and points the device at it. Only on a device you own.")) return;
+      var out = $("#oc-out");
+      if (out) { out.style.display = ""; out.textContent = "setting up…"; }
+      var host = ($("#oc-host").value || "").trim();
+      var port = parseInt($("#oc-port").value, 10) || 8080;
+      postJSON("/api/intercept/setup", { device: DEV, host: host || undefined, port: port, confirm: true })
+        .then(function (r) {
+          if (r.ok === false && r.output) { if (out) out.textContent = r.output; toast(r.output, "warn"); loadInterceptStatus(); return; }
+          var lines = (r.steps || []).map(function (s) { return (s.ok ? "✓ " : "✗ ") + s.step + " — " + (s.output || "").split("\n")[0]; });
+          lines.unshift("proxy → " + r.host + ":" + r.port);
+          if (out) out.textContent = lines.join("\n");
+          toast(r.ok ? "interception set up — restart the target app" : "setup finished with issues",
+                r.ok ? "good" : "warn",
+                r.mitm_installed ? "" : "mitmproxy is not installed here: pip install mitmproxy");
+          loadInterceptStatus(); loadMitmCard();
+        }).catch(function () { if (out) out.textContent = "request failed"; toast("setup failed", "crit"); });
+    });
+  })();
 
   function loadInterceptStatus() {
     var box = $("#ic-status");
@@ -3048,13 +3089,67 @@
     if (!r) return;
     var hdr = function (h) { return Object.keys(h || {}).map(function (k) {
       return esc(k) + ": " + esc(String(h[k])); }).join("\n"); };
-    toast(r.method + " " + r.host + r.path, r.scheme === "http" ? "crit" : "",
-          (r.content_type || "") + " · " + (r.resp_bytes || 0) + " B");
     var out = $("#rq-count");
-    if (out && (r.req_headers || r.resp_headers)) {
+    if (out) {
       out.innerHTML = '<pre class="rq-det mono">' + esc("» " + r.method + " " + r.scheme + "://" + r.host + r.path) +
         "\n" + esc(hdr(r.req_headers)) + "\n\n« " + (r.status || "") + "\n" + esc(hdr(r.resp_headers)) + "</pre>";
     }
+    // load it into the Repeater so it can be edited and resent
+    rqToRepeater(r);
+  }
+  function rqToRepeater(r) {
+    var m = $("#rp-method"), u = $("#rp-url"), h = $("#rp-headers"), b = $("#rp-body");
+    if (m) m.value = r.method || "GET";
+    if (u) u.value = r.scheme + "://" + r.host + r.path;
+    if (h) h.value = Object.keys(r.req_headers || {}).map(function (k) {
+      return k + ": " + r.req_headers[k]; }).join("\n");
+    if (b) b.value = r.req_body_preview || "";
+  }
+  function rpSpec() {
+    var headers = {};
+    ($("#rp-headers").value || "").split("\n").forEach(function (line) {
+      var i = line.indexOf(":");
+      if (i > 0) headers[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    });
+    return { method: $("#rp-method").value, url: ($("#rp-url").value || "").trim(),
+             headers: headers, body: $("#rp-body").value || "" };
+  }
+  (function initRepeater() {
+    function on(id, fn) { var e = $("#" + id); if (e) e.addEventListener("click", fn); }
+    on("rp-send", function () {
+      var spec = rpSpec();
+      if (!/^https?:\/\//.test(spec.url)) { toast("enter an http(s) URL", "warn"); return; }
+      var out = $("#rp-out");
+      if (out) { out.style.display = ""; out.textContent = "sending…"; }
+      spec.device = DEV; spec.through_proxy = true;
+      postJSON("/api/requests/replay", spec).then(function (r) {
+        if (r.ok === false) { if (out) out.textContent = r.output || "failed"; toast(r.output || "replay failed", "warn"); return; }
+        var hdr = Object.keys(r.headers || {}).map(function (k) { return k + ": " + r.headers[k]; }).join("\n");
+        if (out) out.textContent = "« " + r.status + "  (" + r.bytes + " B, " + r.duration_ms + " ms)\n" + hdr + "\n\n" + (r.body_preview || "");
+        toast("replay: " + r.status, r.status < 400 ? "good" : "warn");
+        if (currentTab === "requests") setTimeout(loadRequests, 400);  // the resend is re-captured
+      }).catch(function () { if (out) out.textContent = "request failed"; toast("replay failed", "crit"); });
+    });
+    on("rp-curl", function () {
+      var s = rpSpec();
+      var parts = ["curl -X " + s.method, "'" + s.url.replace(/'/g, "'\\''") + "'"];
+      Object.keys(s.headers).forEach(function (k) {
+        parts.push("-H '" + (k + ": " + s.headers[k]).replace(/'/g, "'\\''") + "'");
+      });
+      if (s.body) parts.push("--data '" + s.body.replace(/'/g, "'\\''") + "'");
+      var cmd = parts.join(" ");
+      var done = function () { toast("cURL copied", "good"); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(cmd).then(done, function () { rpFallbackCopy(cmd, done); });
+      } else { rpFallbackCopy(cmd, done); }
+    });
+  })();
+  function rpFallbackCopy(text, done) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      document.execCommand("copy"); ta.remove(); done();
+    } catch (e) { toast("copy failed", "warn"); }
   }
   function rqLoadPkgs() {
     var dl = $("#rq-pkglist");

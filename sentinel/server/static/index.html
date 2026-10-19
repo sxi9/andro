@@ -505,6 +505,25 @@
           </div>
         </div>
 
+        <div class="card pad0 ic-card oneclick-card" style="margin-top:14px">
+          <div class="ch"><h3>One-click interception</h3>
+            <span class="tiphint" data-tip="Self-contained, like Reqable: Sentinel generates its own CA, installs it on the device, starts its own proxy with that CA, and points the device at it. No Burp or external app needed. (You can still bring your own CA in the Proxy CA card below.)">?</span>
+            <span class="hint" id="oc-castate">built-in CA: checking…</span></div>
+          <div class="ic-body">
+            <p class="ic-help">Sentinel makes and installs its own CA and runs its own proxy — no Burp or other app required. Pick a port; the device is pointed at this computer automatically.</p>
+            <div class="ic-field ic-row">
+              <label class="ic-lbl">Proxy host<input id="oc-host" class="adbin" placeholder="(auto-detect LAN IP)" autocomplete="off"></label>
+              <label class="ic-lbl ic-portlbl">Port<input id="oc-port" class="adbin" value="8080" inputmode="numeric" autocomplete="off"></label>
+            </div>
+            <div class="ic-row">
+              <button class="btn p" id="oc-setup" title="Generate CA + install on device + start proxy + point device">Set up interception</button>
+              <button class="btn" id="oc-gen">Generate / regenerate CA</button>
+              <a class="btn" id="oc-download" href="/api/intercept/ca/builtin/download">Download CA</a>
+            </div>
+            <div id="oc-out" class="ic-out" style="display:none"></div>
+          </div>
+        </div>
+
         <div class="card pad0 ic-card" style="margin-top:14px">
           <div class="ch"><h3>Interception status</h3>
             <span class="tiphint" data-tip="Live trust-store and proxy state for the selected device: whether su is available, the Android version, whether a proxy CA is in the trust store (and in which store — the Conscrypt apex on Android 14, or the legacy system store), and whether a proxy is set globally or for one app.">?</span>
@@ -635,7 +654,22 @@
             <div id="rq-count" class="hint" style="padding:6px 15px;border-bottom:1px solid var(--border-soft)"></div>
             <div id="rq-list" class="applist" style="max-height:620px"><div class="empty">pick an app, or start mitmproxy and drive the app</div></div>
           </div>
-          <div class="card pad0" style="width:340px;flex:0 0 340px">
+          <div class="card pad0" style="width:360px;flex:0 0 360px">
+            <div class="ch"><h3>Repeater</h3>
+              <span class="tiphint" data-tip="Edit and resend a request (through the running proxy, so it is re-captured) — like Reqable's resend. Click a request then Edit, or compose one here.">?</span></div>
+            <div class="ic-body">
+              <div class="ic-field ic-row">
+                <select id="rp-method" class="devpick"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select>
+                <input id="rp-url" class="adbin" placeholder="https://host/path" autocomplete="off" spellcheck="false">
+              </div>
+              <label class="ic-lbl">Headers (one per line, Name: value)<textarea id="rp-headers" class="ic-pem mono" rows="4" spellcheck="false"></textarea></label>
+              <label class="ic-lbl">Body<textarea id="rp-body" class="ic-pem mono" rows="3" spellcheck="false"></textarea></label>
+              <div class="ic-row">
+                <button class="btn p" id="rp-send">Send</button>
+                <button class="btn" id="rp-curl">Copy as cURL</button>
+              </div>
+              <div id="rp-out" class="ic-out" style="display:none"></div>
+            </div>
             <div class="ch"><h3>Watches</h3></div>
             <div id="rq-watches" class="ic-body"><div class="empty">no watches</div></div>
           </div>

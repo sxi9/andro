@@ -1520,6 +1520,12 @@ def create_app(cfg: Config) -> FastAPI:
         reqmon.delete_watch(dctx, str((body or {}).get("id", "")))
         return {"ok": True}
 
+    @app.post("/api/requests/replay")
+    async def requests_replay(body: dict):
+        # Repeater: resend an (edited) request, through the running proxy when up
+        from ..service import reqmon
+        return await asyncio.to_thread(reqmon.replay, hub, body or {})
+
     @app.post("/api/_mitm_flow")
     async def mitm_flow(body: dict):
         # internal: the mitmdump addon POSTs each flow here
@@ -1613,6 +1619,60 @@ def create_app(cfg: Config) -> FastAPI:
             return _refuse(str(e))
         return Response(content=data, media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    # ---------- built-in CA + one-click setup (acts like Reqable) ----------
+    @app.get("/api/intercept/ca/builtin")
+    async def ca_builtin():
+        from ..service import ca
+        return await asyncio.to_thread(ca.info, hub)
+
+    @app.post("/api/intercept/ca/builtin/generate")
+    async def ca_builtin_generate(body: dict | None = None):
+        body = body or {}
+        from ..service import ca
+        return await asyncio.to_thread(ca.generate, hub, force=bool(body.get("force")))
+
+    @app.get("/api/intercept/ca/builtin/download")
+    async def ca_builtin_download():
+        from ..service import ca
+        pem = await asyncio.to_thread(ca.cert_pem, hub)
+        return Response(content=pem, media_type="application/x-pem-file",
+                        headers={"Content-Disposition": 'attachment; filename="sentinel-ca.pem"'})
+
+    @app.post("/api/intercept/setup")
+    async def intercept_setup(body: dict):
+        """One-click: generate Sentinel's CA, install it on the device, start the
+        proxy with that CA, and point the device at it."""
+        if not (body or {}).get("confirm"):
+            return _refuse("setting up interception requires confirm=true")
+        try:
+            port = int((body or {}).get("port") or 8080)
+        except (TypeError, ValueError):
+            return _refuse("invalid port")
+        if not 1 <= port <= 65535:
+            return _refuse("port out of range")
+        dctx = _dev((body or {}).get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import ca, intercept, mitm
+        host = (body or {}).get("host")
+        if not isinstance(host, str) or not _HOST_RE.match(host):
+            host = mitm.host_ip()
+        if not host:
+            return _refuse("could not determine this computer's LAN IP; enter the proxy host")
+
+        steps: list[dict] = []
+        pem = await asyncio.to_thread(ca.cert_pem, hub)
+        install = await asyncio.to_thread(intercept.install_ca, dctx, pem)
+        steps.append({"step": "install-ca", "ok": install.get("ok"), "output": install.get("output")})
+        m = await asyncio.to_thread(mitm.start, hub, port, "regular", cfg.port)
+        steps.append({"step": "start-proxy", "ok": m.get("ok"), "output": m.get("output")})
+        prox = await asyncio.to_thread(intercept.set_proxy, dctx, "global", host, port, None)
+        steps.append({"step": "set-proxy", "ok": prox.get("ok"), "output": prox.get("output")})
+        ok = all(s["ok"] for s in steps)
+        return {"ok": ok, "host": host, "port": port, "steps": steps,
+                "mitm_installed": m.get("ok") or "not installed" not in (m.get("output") or ""),
+                "ca": install.get("ca")}
 
     # ---------- root / su ----------
     @app.get("/api/root")

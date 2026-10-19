@@ -34,7 +34,39 @@ class _Store:
 
 
 class _Hub:
-    def __init__(self): self.store = _Store()
+    def __init__(self, data_dir=None):
+        self.store = _Store()
+        if data_dir is not None:
+            class _Cfg: pass
+            self.cfg = _Cfg()
+            self.cfg.data_dir = data_dir
+        self._mitm = {"proc": None, "port": None}
+    def resolve(self, s): return None
+
+
+def test_builtin_ca_generate_and_confdir(tmp_path):
+    from sentinel.service import ca
+    h = _Hub(data_dir=tmp_path)
+    assert ca.exists(h) is False
+    info = ca.generate(h)
+    assert info["exists"] and info["is_ca"] and info["hash_name"].endswith(".0")
+    # reused unless forced
+    assert ca.generate(h)["sha256"] == info["sha256"]
+    assert ca.generate(h, force=True)["sha256"] != info["sha256"]
+    pem = ca.cert_pem(h)
+    assert b"BEGIN CERTIFICATE" in pem
+    conf = ca.mitm_confdir(h)
+    combined = (tmp_path / "ca" / "mitm" / "mitmproxy-ca.pem").read_bytes()
+    assert b"PRIVATE KEY" in combined and b"BEGIN CERTIFICATE" in combined
+    assert conf.endswith("mitm")
+
+
+def test_replay_validates_without_network():
+    from sentinel.service import reqmon
+    h = _Hub(data_dir=None)
+    assert reqmon.replay(h, {"url": "ftp://x", "method": "GET"})["ok"] is False
+    assert reqmon.replay(h, {"url": "http://x", "method": "BREW"})["ok"] is False
+    assert reqmon.replay(h, {"url": "nota-url"})["ok"] is False
 
 
 class _Dctx:

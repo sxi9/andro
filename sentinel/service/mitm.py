@@ -97,6 +97,13 @@ def start(hub, port: int, mode: str, dashboard_port: int) -> dict:
     addon = addon_dir / "sentinel_addon.py"
     addon.write_text(_ADDON % {"port": int(dashboard_port), "device": None})
     cmd = [_which(), "-p", str(int(port)), "-s", str(addon), "-q"]
+    # use Sentinel's own CA so the device trusts one cert we control, and
+    # mitmproxy mints per-host leaf certs from it (like Reqable/HTTP Toolkit)
+    try:
+        from . import ca
+        cmd += ["--set", "confdir=" + ca.mitm_confdir(hub)]
+    except Exception:  # noqa: BLE001 - fall back to mitmproxy's own CA
+        pass
     if mode == "transparent":
         cmd += ["--mode", "transparent"]
     try:
@@ -121,6 +128,21 @@ def stop(hub) -> dict:
         proc.terminate()
     s["proc"], s["port"] = None, None
     return {"ok": True, "output": "mitmdump stopped"}
+
+
+def host_ip() -> str | None:
+    """Best-effort LAN IP of this computer, for pointing the device's proxy at
+    it. Uses a dummy UDP socket (no packet is sent)."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return None
 
 
 def ingest(hub, device, flow: dict) -> None:

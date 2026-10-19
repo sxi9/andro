@@ -3013,7 +3013,25 @@
     on("ic-mode", icSyncMode, "change");
     on("ic-pemfile", icReadPemFile, "change");
     on("ic-camodule", icCaModule);
+    on("ic-builtin", icBuiltinInstall);
   })();
+
+  function icBuiltinInstall() {
+    if (typeof confirm === "function" &&
+        !confirm("Create Sentinel's CA (if needed) and install it into this device's trust store over root? Only on a device you own.")) return;
+    var out = $("#ic-inspect-out");
+    if (out) { out.style.display = ""; out.textContent = "creating & installing over su…"; }
+    postJSON("/api/intercept/ca/builtin/install", { device: DEV, confirm: true })
+      .then(function (r) {
+        if (out) out.textContent = (r.ok ? "✓ installed: " : "✗ ") +
+          ((r.ca && r.ca.subject) || "") + "\n" + (r.output || "");
+        toast(r.ok ? "Sentinel CA created & installed" : "failed: " + (r.output || "").split("\n")[0],
+              r.ok ? "good" : "warn",
+              r.ok ? "restart the target app to pick up the CA" : "");
+        loadInterceptStatus();
+        loadBuiltinCa();
+      }).catch(function () { if (out) out.textContent = "request failed"; toast("request failed", "crit"); });
+  }
 
   function icCaModule() {
     var pem = ($("#ic-pem").value || "").trim();

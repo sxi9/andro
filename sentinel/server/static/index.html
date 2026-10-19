@@ -535,7 +535,10 @@
           <div class="card pad0 ic-card">
             <div class="ch"><h3>Proxy CA</h3><span class="hint">trust the Burp / mitmproxy cert</span></div>
             <div class="ic-body">
-              <p class="ic-help">Paste the proxy's CA certificate (PEM) or load it from a file, inspect it, then install it into the device trust store so non-pinning apps trust the proxy.</p>
+              <p class="ic-help">Use Sentinel's own CA (no external app needed) — create and install it in one step over root — or paste a Burp/mitmproxy CA (PEM) and install that instead.</p>
+              <div class="ic-row">
+                <button class="btn p" id="ic-builtin" title="Generate Sentinel's CA if needed and install it into the device trust store over su — one step">Create &amp; install Sentinel CA (root)</button>
+              </div>
               <textarea id="ic-pem" class="ic-pem mono" rows="7" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
               <div class="ic-row">
                 <label class="btn ic-file">Load file…<input type="file" id="ic-pemfile" accept=".pem,.crt,.cer,.der,.txt" hidden></label>

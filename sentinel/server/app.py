@@ -1639,6 +1639,23 @@ def create_app(cfg: Config) -> FastAPI:
         return Response(content=pem, media_type="application/x-pem-file",
                         headers={"Content-Disposition": 'attachment; filename="sentinel-ca.pem"'})
 
+    @app.post("/api/intercept/ca/builtin/install")
+    async def ca_builtin_install(body: dict):
+        """Create the built-in CA if needed and install it on the device in one
+        step (over su / root), from the Proxy CA card."""
+        if not (body or {}).get("confirm"):
+            return _refuse("installing the CA requires confirm=true")
+        dctx = _dev((body or {}).get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import ca, engagement, intercept
+        try:
+            engagement.require_scope(hub)   # observe mode blocks device changes
+        except engagement.ScopeError as e:
+            return JSONResponse({"ok": False, "output": str(e)}, status_code=403)
+        pem = await asyncio.to_thread(ca.cert_pem, hub)   # generates on first use
+        return await asyncio.to_thread(intercept.install_ca, dctx, pem)
+
     @app.post("/api/intercept/setup")
     async def intercept_setup(body: dict):
         """One-click: generate Sentinel's CA, install it on the device, start the

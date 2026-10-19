@@ -55,6 +55,7 @@ class FakeAdb:
         self.cmds: list[tuple[str, bool]] = []
         self.pushed: list[tuple[str, bytes]] = []
         self._http_proxy = "null"  # tracks `settings put/get global http_proxy`
+        self._removed: set[str] = set()  # cert paths an `rm -f` has deleted
 
     def shell_sync(self, cmd, su=False, timeout=60):
         self.cmds.append((cmd, su))
@@ -65,12 +66,17 @@ class FakeAdb:
             return ""
         if cmd == "settings get global http_proxy":
             return self._http_proxy + "\n"
-        if "mount -t tmpfs" in cmd or "mount -o rw,remount" in cmd:
-            # the success probe `ls <store>/<hash>` at the tail of the script
-            m = re.search(r"ls '?(/\S*?/([0-9a-f]{8}\.0))'?$", cmd)
-            return (m.group(1) if m else "") + "\n"
-        if cmd.startswith("ls ") and ".0" in cmd:
-            return cmd.split("ls ", 1)[1].strip().strip("'") + "\n"
+        for rm in re.findall(r"rm -f '?(/\S*?/[0-9a-f]{8}\.0)'?", cmd):
+            self._removed.add(rm)
+        if "mount -t tmpfs" in cmd or "mount -o rw,remount" in cmd or (
+                cmd.startswith("umount") and "ls " in cmd) or (
+                cmd.startswith("ls ") and ".0" in cmd):
+            # echo every hashed cert path the `ls` lists, minus any rm'd this cmd
+            paths = [p for p in re.findall(r"ls '?(/\S[^']*?/[0-9a-f]{8}\.0)", cmd)]
+            paths += [p for p in re.findall(r"(/\S*?/[0-9a-f]{8}\.0)", cmd)
+                      if cmd.strip().startswith("ls") and p not in paths]
+            paths = [p for p in paths if p not in self._removed]
+            return "\n".join(paths) + "\n"
         return ""
 
     def push_file(self, local, remote, timeout=600):
@@ -294,3 +300,44 @@ def test_status_assembles_device_and_blocks():
     st = intercept.status(c)
     assert st["ca"]["installed"] is True
     assert st["proxy"]["mode"] == "global" and st["proxy"]["port"] == 9090
+
+
+def test_proxy_switching_target_tears_down_the_previous_app():
+    # per-app(A) -> per-app(B): B's call must remove A's OUTPUT jump before
+    # adding B's, so A is not left silently redirected into the shared chain.
+    c = Ctx()
+    intercept.set_proxy(c, "per-app", host="1.1.1.1", port=8080, package=PKG)       # uid 10234
+    c.adb.cmds.clear()
+    intercept.set_proxy(c, "per-app", host="2.2.2.2", port=9090, package="com.y")   # uid 10235
+    joined = " ;; ".join(cmd for cmd, su in c.adb.cmds if su)
+    for ipt in ("iptables", "ip6tables"):
+        # A's jump (10234) is deleted; B's jump (10235) is added
+        assert f"{ipt} -t nat -D OUTPUT -m owner --uid-owner 10234 -j SENTINEL_PROXY" in joined
+        assert f"{ipt} -t nat -A OUTPUT -m owner --uid-owner 10235 -j SENTINEL_PROXY" in joined
+    assert c.store.snaps["intercept_proxy"]["hooked_uids"] == [10235]
+    assert c.store.snaps["intercept_proxy"]["package"] == "com.y"
+
+
+def test_proxy_per_app_then_global_tears_down_the_redirect():
+    c = Ctx()
+    intercept.set_proxy(c, "per-app", host="1.1.1.1", port=8080, package=PKG)
+    c.adb.cmds.clear()
+    intercept.set_proxy(c, "global", host="3.3.3.3", port=7070)
+    joined = " ;; ".join(cmd for cmd, su in c.adb.cmds if su)
+    for ipt in ("iptables", "ip6tables"):
+        assert f"{ipt} -t nat -D OUTPUT -m owner --uid-owner {UID} -j SENTINEL_PROXY" in joined
+    assert c.store.snaps["intercept_proxy"] == {
+        "mode": "global", "host": "3.3.3.3", "port": 7070,
+        "package": None, "uid": None, "hooked_uids": []}
+
+
+def test_revert_ca_removes_a_system_written_cert():
+    c = Ctx(sdk=30)  # pre-14 -> writable /system path
+    intercept.install_ca(c, CA_PEM)
+    hash_name = c.store.snaps["intercept_ca"]["hash_name"]
+    c.adb.cmds.clear()
+    res = intercept.revert_ca(c)
+    assert res["ok"] is True
+    rm = next(cmd for cmd, su in c.adb.cmds if cmd.startswith("umount") or "rm -f" in cmd)
+    assert f"/system/etc/security/cacerts/{hash_name}" in " ;; ".join(cmd for cmd, _ in c.adb.cmds)
+    assert c.store.snaps.get("intercept_ca") in ({}, None)

@@ -42,6 +42,9 @@ _CHAIN = "SENTINEL_PROXY"  # the per-app nat chain we own and tear down on rever
 _PKG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.]{1,254}\Z")
 # IPv4 or hostname for the proxy endpoint (the ':' of an IPv6 literal is out).
 _HOST = re.compile(r"^[A-Za-z0-9_.-]{1,255}\Z")
+# an OpenSSL subject-hash cert filename (8 hex + .0); guards the revert path
+# that builds `rm <store>/<hash>` from a stored value
+_HASH_NAME = re.compile(r"[0-9a-f]{8}\.0")
 
 
 class _Refused(AdbError):
@@ -237,7 +240,9 @@ def _apex_install_script(pushed: str, hash_name: str, tmp_dir: str) -> str:
         f"chmod 644 {SYS_CACERTS}/* {APEX_CACERTS}/*",
         f"chcon {SELINUX_CTX} {SYS_CACERTS}/* {APEX_CACERTS}/*",
         f"rm -rf {q_pem}",                             # drop the staged PEM
-        f"ls {cert_sys}",                              # success probe (prints path if present)
+        # success probe: the apex bind is what Android 14 apps actually read,
+        # so confirm the cert landed there (and in the legacy path)
+        f"ls {shlex.quote(f'{APEX_CACERTS}/{hash_name}')} {cert_sys}",
     ]
     return "; ".join(steps)
 
@@ -323,18 +328,34 @@ def install_ca(dctx, pem_bytes) -> dict:
 
 
 def revert_ca(dctx) -> dict:
-    """Unmount the overlaid trust store (both paths) and forget the install."""
+    """Undo the install: unmount the overlaid trust store, and for a pre-14
+    install that wrote the cert into a writable /system, also remove that file
+    (an unmount alone would leave it there)."""
     adb = getattr(dctx, "adb", None)
     if adb is None:
         return {"ok": False, "output": "needs a real device (not demo mode)"}
-    cmd = (f"umount {shlex.quote(SYS_CACERTS)} 2>/dev/null; "
-           f"umount {shlex.quote(APEX_CACERTS)} 2>/dev/null; echo reverted")
+    snap = _snapshot(dctx, "intercept_ca") or {}
+    hash_name = snap.get("hash_name")
+    steps = [f"umount {shlex.quote(SYS_CACERTS)} 2>/dev/null",
+             f"umount {shlex.quote(APEX_CACERTS)} 2>/dev/null"]
+    if hash_name and _HASH_NAME.fullmatch(hash_name) and snap.get("store") != "apex":
+        # the writable-/system path left a real file; remount rw, delete it, ro
+        cert = shlex.quote(f"{SYS_CACERTS}/{hash_name}")
+        steps += [
+            "mount -o rw,remount /system 2>/dev/null || mount -o rw,remount / 2>/dev/null || true",
+            f"rm -f {cert} 2>/dev/null",
+            "mount -o ro,remount /system 2>/dev/null || mount -o ro,remount / 2>/dev/null || true",
+            f"ls {cert} 2>/dev/null",   # prints nothing once the file is gone
+        ]
+    cmd = "; ".join(steps) + "; echo reverted"
     try:
         out = adb.shell_sync(cmd, su=True, timeout=30).strip()
-        ok = True  # best-effort: either path may not have been mounted
+        # if we removed a system file, the trailing ls must not still show it
+        ok = not (hash_name and snap.get("store") != "apex" and hash_name in out)
     except AdbError as e:
         out, ok = str(e), False
-    _put_snapshot(dctx, "intercept_ca", {})
+    if ok:
+        _put_snapshot(dctx, "intercept_ca", {})
     _emit(dctx, action="ca.revert", ok=ok, what="CA revert",
           detail="trust store restored")
     return {"ok": ok, "output": out or "reverted"}
@@ -396,17 +417,31 @@ def _iptables_on_script(uid: int, host: str, port: int) -> str:
     return "; ".join(lines)
 
 
-def _iptables_off_script(uid: int | None) -> str:
-    """Remove the OUTPUT jump (if we know the uid), then flush and drop the
-    SENTINEL_PROXY chain on both IP families."""
+def _iptables_off_script(uids) -> str:
+    """Remove the OUTPUT jump for every uid we ever hooked, then flush and drop
+    the SENTINEL_PROXY chain on both IP families. Deleting only one uid's jump
+    (while the chain is shared) would leave other apps redirected, so we delete
+    them all; a bare `-D OUTPUT -j CHAIN` cannot match a `--uid-owner` rule."""
+    clean = [int(u) for u in (uids or []) if u is not None]
     lines: list[str] = []
     for ipt in ("iptables", "ip6tables"):
-        if uid is not None:
+        for u in clean:
             lines.append(
-                f"{ipt} -t nat -D OUTPUT -m owner --uid-owner {int(uid)} -j {_CHAIN} 2>/dev/null")
+                f"{ipt} -t nat -D OUTPUT -m owner --uid-owner {u} -j {_CHAIN} 2>/dev/null")
         lines += [f"{ipt} -t nat -F {_CHAIN} 2>/dev/null",
                   f"{ipt} -t nat -X {_CHAIN} 2>/dev/null"]
     return "; ".join(lines)
+
+
+def _hooked_uids(dctx) -> list[int]:
+    """Every uid currently jumped into our chain, from the snapshot (falls back
+    to the single stored uid for snapshots written before this was tracked)."""
+    snap = _snapshot(dctx, "intercept_proxy") or {}
+    uids = snap.get("hooked_uids")
+    if uids:
+        return [int(u) for u in uids if u is not None]
+    u = snap.get("uid")
+    return [int(u)] if u is not None else []
 
 
 def set_proxy(dctx, mode, host=None, port=None, package=None) -> dict:
@@ -429,6 +464,28 @@ def set_proxy(dctx, mode, host=None, port=None, package=None) -> dict:
         return {"ok": False, "output": "needs a real device (not demo mode)",
                 "proxy": _empty_proxy()}
 
+    # Resolve the per-app uid BEFORE any teardown, so a failed resolve refuses
+    # without disturbing a prior interception.
+    uid = None
+    if mode == "per-app":
+        uid = package_uid(dctx, package, 0)
+        if uid is None:
+            _emit(dctx, action="proxy.per-app", ok=False, what="Proxy",
+                  detail=f"{package} (uid?)", host=host, port=port, package=package)
+            return {"ok": False, "output": "could not resolve the app's uid (installed?)",
+                    "proxy": _proxy_from_snapshot(dctx)}
+
+    # Tear down every previously-hooked uid before applying the new config: the
+    # SENTINEL_PROXY chain is shared, so switching the target app (or going
+    # global/off) must not leave an earlier app silently redirected.
+    prev_uids = _hooked_uids(dctx)
+    teardown = ""
+    if prev_uids:
+        try:
+            teardown = adb.shell_sync(_iptables_off_script(prev_uids), su=True, timeout=30).strip()
+        except AdbError as e:
+            teardown = str(e)
+
     if mode == "global":
         try:
             out = adb.shell_sync(
@@ -437,42 +494,36 @@ def set_proxy(dctx, mode, host=None, port=None, package=None) -> dict:
             ok = "Exception" not in out
         except AdbError as e:
             out, ok = str(e), False
-        new = {"mode": "global", "host": host, "port": port, "package": None, "uid": None}
+        new, hooked = {"mode": "global", "host": host, "port": port,
+                       "package": None, "uid": None}, []
         _emit(dctx, action="proxy.global", ok=ok, what="Proxy",
               detail=f"global {host}:{port}", host=host, port=port)
 
     elif mode == "per-app":
-        uid = package_uid(dctx, package, 0)  # resolve the app's uid for user 0
-        if uid is None:
-            res = {"ok": False, "output": "could not resolve the app's uid (installed?)",
-                   "proxy": _proxy_from_snapshot(dctx)}
-            _emit(dctx, action="proxy.per-app", ok=False, what="Proxy",
-                  detail=f"{package} (uid?)", host=host, port=port, package=package)
-            return res
         try:
             out = adb.shell_sync(_iptables_on_script(uid, host, port), su=True, timeout=30).strip()
             ok = "Permission denied" not in out and "not found" not in out
         except AdbError as e:
             out, ok = str(e), False
-        new = {"mode": "per-app", "host": host, "port": port, "package": package, "uid": int(uid)}
+        new, hooked = {"mode": "per-app", "host": host, "port": port,
+                       "package": package, "uid": int(uid)}, [int(uid)]
         _emit(dctx, action="proxy.per-app", ok=ok, what="Proxy",
               detail=f"{package} -> {host}:{port}", host=host, port=port, package=package)
 
-    else:  # off: clear the global setting AND tear down the per-app chain
-        prev_uid = _proxy_from_snapshot(dctx).get("uid")
+    else:  # off: the chain + every jump are already gone (teardown above);
+           # just clear the global setting
         try:
-            out1 = adb.shell_sync("settings put global http_proxy :0", timeout=20).strip()
-            out2 = adb.shell_sync(_iptables_off_script(_int_or_none(prev_uid)),
-                                  su=True, timeout=30).strip()
-            out = (out1 + "\n" + out2).strip()
-            ok = "Permission denied" not in out
+            out = adb.shell_sync("settings put global http_proxy :0", timeout=20).strip()
+            ok = "Permission denied" not in out and "Exception" not in out
         except AdbError as e:
             out, ok = str(e), False
-        new = _empty_proxy()
+        out = (teardown + "\n" + out).strip()
+        new, hooked = _empty_proxy(), []
         _emit(dctx, action="proxy.off", ok=ok, what="Proxy", detail="cleared")
 
     if ok:
-        _put_snapshot(dctx, "intercept_proxy", new)
+        # the snapshot tracks hooked_uids for teardown; the returned block does not
+        _put_snapshot(dctx, "intercept_proxy", {**new, "hooked_uids": hooked})
     return {"ok": ok, "output": out or ("done" if ok else "failed"),
             "proxy": new if ok else _proxy_from_snapshot(dctx)}
 

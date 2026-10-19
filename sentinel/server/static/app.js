@@ -2579,7 +2579,7 @@
      backend validates+quotes every device-bound string and owns the audit
      event, so this stays a thin UI with clean error / loading states. */
   var icStatus = null;      // last /status payload (or null after a failed load)
-  var icPkgsDev = null;     // device whose package datalist is loaded (lazy, per device)
+  var icPkgsDev = false;    // device whose package datalist is loaded (lazy, per device; false != any real DEV incl. null)
 
   function loadIntercept() {
     loadInterceptStatus();
@@ -2706,7 +2706,7 @@
       dl.innerHTML = apps.map(function (a) {
         return '<option value="' + esc(a.package) + '">' + esc(a.label || a.package) + "</option>";
       }).join("");
-    }).catch(function () { icPkgsDev = null; });  // retry on the next tab visit
+    }).catch(function () { icPkgsDev = false; });  // retry on the next tab visit
   }
 
   function icReadPemFile(e) {        // FileReader -> textarea, client-side only

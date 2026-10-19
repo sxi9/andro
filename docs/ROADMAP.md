@@ -47,28 +47,27 @@ single place that tracks every plan we made and what is built vs pending.
   - [x] Proxy toggle: global (`settings http_proxy`) + **per-app transparent redirect** (SENTINEL_PROXY nat chain, iptables + ip6tables)
   - [x] No stale per-app redirect on target/mode switch (tracks all hooked uids)
   - [x] Intercept tab: authorization banner, status chips, CA inspect/install/revert, proxy host/port/mode + per-app picker
-- [ ] **Step 2 — per-app request monitor** (NEXT, recommended)
-  - [ ] Per-app request stream (method/host/path/status/size/duration; full headers+body for intercepted HTTPS)
-  - [ ] Composable filter bar (host/path regex, method, status class, scheme, has-auth-header, new-host)
-  - [ ] Saved **watches** → alerts (cleartext, token-in-URL, tracker host, 4xx burst) via the rules/alerts pipeline
-  - [ ] Per-app endpoint map + HAR/CSV/JSON export
-  - [ ] "Did it work?" indicator (traffic flowing = CA+proxy worked; nothing = app pins)
-- [ ] **Step 3 — Frida unpinning** (for apps that pin after step 1)
+- [x] **Step 2 — per-app request monitor** (DONE)
+  - [x] Per-app request stream (method/host/path/status/size/duration; headers on expand)
+  - [x] Composable filter bar (host, path regex, method, status class, scheme, has-auth, new-host)
+  - [x] Saved **watches** → alerts via the alerts pipeline
+  - [x] Per-app endpoint map + HAR/CSV/JSON export
+- [x] **Step 3 — Frida unpinning** (DONE: presets OkHttp/TrustManager/Conscrypt/WebView/Flutter/all, spawn/attach)
   - [ ] `frida-server` lifecycle (arch-matched push, start/stop, status)
   - [ ] Unpin presets: OkHttp `CertificatePinner`, `TrustManagerImpl`, Conscrypt, WebView, **Flutter/BoringSSL**; `objection` one-click
   - [ ] Spawn/attach per in-scope app; custom-script slot; reports bypass result
-- [ ] **Step 3.5 — mitmproxy bridge** (full flow view feeding step 2)
-- [ ] **Step 1.5 — Magisk cert module export** (CA survives reboot / reaches running apps without restart)
+- [x] **Step 3.5 — mitmproxy bridge** (DONE: streams flows into the Requests tab)
+- [x] **Step 1.5 — Magisk cert module export** (DONE: downloadable flashable module)
 - [ ] iOS support — NOT planned (Sentinel is Android/ADB-only; iOS would be a separate device plane: libimobiledevice, jailbreak, iOS-specific unpinning)
 
 ## D. Pentest platform roadmap (`docs/PENTEST-PLATFORM-PLAN.md`) — PLANNED
 
 Authorized mobile-application security testing (MAST) workbench. Build order below.
 
-- [ ] **Phase 0 — Engagement / scope / authorization gate** (build first)
-  - [ ] Engagement records (client, dates, authorization reference)
-  - [ ] Scope: in-scope packages / hosts / CIDRs + out-of-scope deny list; `observe` vs `active` mode
-  - [ ] Append-only audit log every active module checks; `engagement.allows(...)` guard
+- [x] **Phase 0 — Engagement / scope / authorization gate** (DONE: records, scope match, observe/active, audit; wired into intercept + frida)
+  - [x] Engagement records (name, client, authorization reference)
+  - [x] Scope: in-scope packages / hosts / CIDRs + out-of-scope deny list; `observe` vs `active` mode
+  - [x] `require_scope(...)` guard wired into the intercept proxy and Frida unpin routes; every active call audit-logged
   - [ ] *Note:* the intercept module already confirms + audit-logs every active call as an interim gate
 - [ ] **Phase 1 — Static analysis (APK SAST), deepened** — *scanner/manifest base already built (B)*
   - [ ] Attack-surface ranking, secrets/entropy scan, TLS-pinning/cleartext detection, library→CVE lookup

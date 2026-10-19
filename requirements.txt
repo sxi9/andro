@@ -4,5 +4,7 @@ uvicorn[standard]>=0.29
 python-multipart>=0.0.9
 # real app names + WebAPK facts, read from each APK's manifest/resources
 pyaxmlparser>=0.3.27
+# APK signatures (App Manager) + proxy-CA parsing (SSL Intercept)
+cryptography>=42.0
 # optional: offline GeoIP enrichment (pair with GeoLite2 .mmdb files)
 # geoip2>=4.8

@@ -130,6 +130,17 @@ def _hash_like(seg: str) -> bool:
     return len(s) >= 12 and sum(c.isdigit() for c in s) / len(s) >= 0.5
 
 
+# pyaxmlparser sometimes returns an UNRESOLVED resource reference as the label
+# ("@7F13000A", "@android:01040142", "0x7f13000a", "@string/app_name"): these
+# are not names, so we reject them and fall back to the friendly package name.
+_BAD_LABEL = re.compile(r"^(@|0x[0-9a-fA-F]{6,}$|res/|\?[0-9a-fA-F])")
+
+
+def _is_bad_label(s) -> bool:
+    return (not isinstance(s, str) or not s.strip()
+            or bool(_BAD_LABEL.match(s.strip())))
+
+
 def friendly_name(pkg: str) -> str:
     """Best-effort readable name when no label is known."""
     if pkg in BUILTIN_LABELS:
@@ -269,7 +280,8 @@ def extract_label_from_apk(size: int, read_range: Callable[[int, int], bytes]) -
     try:
         apk = APK(tmp)
         label = (apk.get_app_name() or "").strip()
-        out: dict = {"label": label} if label else {}
+        # a raw resource reference ("@7F13000A") is not a usable name
+        out: dict = {"label": label} if label and not _is_bad_label(label) else {}
         meta = _manifest_meta(apk.get_android_manifest_xml())
         if meta:
             out["meta"] = meta
@@ -290,9 +302,11 @@ def resolve_labels(dctx, pkgs: list[str], progress=None) -> dict[str, str]:
     manifest facts land in the "apk_meta" snapshot alongside."""
     cache: dict[str, str] = dctx.store.get_snapshot("labels") or {}
     meta_cache: dict[str, dict] = dctx.store.get_snapshot("apk_meta") or {}
-    # WebAPKs labelled before meta existed are read once more for their URL
+    # re-read a package when it is uncached, when a WebAPK still lacks meta, or
+    # when a prior run cached a bad resource-reference label ("@7F13000A")
     todo = [p for p in pkgs
-            if p not in cache or (_WEBAPK_RE.search(p) and p not in meta_cache)]
+            if p not in cache or _is_bad_label(cache.get(p))
+            or (_WEBAPK_RE.search(p) and p not in meta_cache)]
     for i, pkg in enumerate(todo):
         try:
             paths = dctx.adb.apk_paths(pkg)
@@ -304,6 +318,8 @@ def resolve_labels(dctx, pkgs: list[str], progress=None) -> dict[str, str]:
             got = extract_label_from_apk(size, rr)
             if got.get("label"):
                 cache[pkg] = got["label"]
+            elif pkg in cache and _is_bad_label(cache.get(pkg)):
+                del cache[pkg]  # drop a previously-cached bad label -> friendly fallback
             if got.get("meta"):
                 meta_cache[pkg] = got["meta"]
             elif _WEBAPK_RE.search(pkg):
@@ -321,6 +337,6 @@ def resolve_labels(dctx, pkgs: list[str], progress=None) -> dict[str, str]:
 
 
 def label_for(pkg: str, cache: dict[str, str] | None = None) -> str:
-    if cache and pkg in cache:
+    if cache and pkg in cache and not _is_bad_label(cache[pkg]):
         return cache[pkg]
     return friendly_name(pkg)

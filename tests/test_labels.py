@@ -153,3 +153,39 @@ def test_extract_label_from_real_apk():
     size, rr = _local_reader(SAMPLE_APK)
     got = extract_label_from_apk(size, rr)
     assert got.get("label") == "F-Droid"
+
+
+def test_resource_reference_labels_are_rejected():
+    """pyaxmlparser can return an unresolved resource ref ("@7F13000A") as the
+    label; it must never be shown, and a cached one must fall back."""
+    from sentinel.enrich.labels import _is_bad_label, label_for, friendly_name
+    for bad in ("@7F13000A", "@android:01040142", "0x7f13000a", "@string/app_name", "", "   "):
+        assert _is_bad_label(bad), bad
+    for good in ("Instagram", "F-Droid", "Web app (WebAPK)", "Mi Browser"):
+        assert not _is_bad_label(good), good
+    # a bad cached label is ignored in favour of the friendly package name
+    assert label_for("com.instagram.android", {"com.instagram.android": "@7F13000A"}) == "Instagram"
+    assert label_for("android", {"android": "@android:01040142"}) == friendly_name("android")
+
+
+def test_extract_label_rejects_resource_reference(monkeypatch):
+    """extract_label_from_apk drops a resource-ref label so the row falls back."""
+    import sentinel.enrich.labels as L
+
+    class _APK:
+        def __init__(self, *a): pass
+        def get_app_name(self): return "@7F13000A"
+        def get_android_manifest_xml(self):
+            import lxml.etree as ET
+            return ET.fromstring("<manifest><application/></manifest>")
+    import pyaxmlparser  # noqa: F401  (skip if the parser is unavailable)
+    monkeypatch.setattr("pyaxmlparser.APK", _APK)
+    # a tiny valid zip with the two wanted entries
+    import io, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("AndroidManifest.xml", b"x")
+        zf.writestr("resources.arsc", b"x")
+    data = buf.getvalue()
+    got = L.extract_label_from_apk(len(data), lambda off, ln: data[off:off + ln])
+    assert "label" not in got  # the "@7F13000A" was rejected

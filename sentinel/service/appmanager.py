@@ -170,7 +170,7 @@ def list_apps(dctx, which: str = "all", user: int | str | None = None,
     or for user="all" the union over every user/profile. Includes packages
     uninstalled for the user(s) (debloated / hidden) when include_uninstalled.
     which: all|user|system|disabled|enabled|uninstalled."""
-    from ..enrich.labels import BUILTIN_LABELS, label_for
+    from ..enrich.labels import BUILTIN_LABELS, label_for, _is_bad_label as _bad_label
     adb = dctx.adb
     flag = {"all": "", "user": "-3", "system": "-s", "disabled": "-d",
             "enabled": "-e", "uninstalled": ""}.get(which, "")
@@ -233,7 +233,8 @@ def list_apps(dctx, which: str = "all", user: int | str | None = None,
         row = {
             "package": pkg,
             "label": label_for(pkg, labels),
-            "label_source": "apk" if pkg in labels else ("known" if pkg in BUILTIN_LABELS else "guess"),
+            "label_source": ("apk" if pkg in labels and not _bad_label(labels.get(pkg))
+                             else "known" if pkg in BUILTIN_LABELS else "guess"),
             "system": pkg in system,
             "enabled": enabled,
             "installed": is_installed,

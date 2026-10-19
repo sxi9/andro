@@ -47,6 +47,11 @@ log = logging.getLogger("sentinel.app")
 _STATIC = Path(__file__).parent / "static"
 _DEMO_ACTION = {"ok": False, "output": "needs a real device (not demo mode)"}
 
+# Proxy host for the intercept routes: an IPv4 or a hostname label. \Z, not a
+# bare $, so no trailing newline can ride into the shell the service quotes it
+# into; the service re-validates and shlex.quote-s before any adb call.
+_HOST_RE = re.compile(r"^[A-Za-z0-9_.-]{1,255}\Z")
+
 # Permissions that materially raise an app's risk, short-named.
 _DANGEROUS = {
     "READ_SMS", "RECEIVE_SMS", "RECORD_AUDIO", "CAMERA", "ACCESS_FINE_LOCATION",
@@ -454,6 +459,17 @@ def _demo_files(path: str) -> list[dict]:
              "perms": "drwxrwx---" if k == "dir" else "-rw-rw----",
              "mtime": "2026-10-15 09:30", "target": None} for n, k in base]
 
+
+
+def _demo_intercept_status() -> dict:
+    """What the Intercept tab shows with no real device: the reference Android
+    14 case (trust store is the Conscrypt apex), nothing installed yet."""
+    return {"demo": True, "root": True, "sdk": 34, "android": "14",
+            "ca": {"installed": False, "subject": None, "sha256": None,
+                   "hash_name": None, "store": "apex", "not_after": None},
+            "proxy": {"mode": "off", "host": None, "port": None,
+                      "package": None, "uid": None},
+            "errors": {}}
 
 
 def _should_store(ev: Event) -> bool:
@@ -1271,6 +1287,100 @@ def create_app(cfg: Config) -> FastAPI:
         _track(dctx, asyncio.to_thread(installer.run_restore, hub, dctx, job))
         return {"job": job["id"], "name": job["name"], "pkg": job["pkg"],
                 "serial": dctx.serial, "state": job["state"]}
+
+    # ---------- SSL interception (CA trust + proxy wiring) ----------
+    # Authorized own-device testing: install the operator's own proxy CA into
+    # the trust store and point the device (or one app) at that proxy, so a
+    # non-pinning app the operator is allowed to test can be intercepted. Every
+    # active (device-changing) call needs confirm=true and refuses demo mode;
+    # the service (imported lazily) does the version-aware device work, its own
+    # strict validation + shlex.quote, and emits the intercept.action audit
+    # event, so these routes stay thin and never double-emit.
+    @app.get("/api/intercept/status")
+    async def intercept_status(device: str | None = None):
+        """Trust-store + proxy state for the Intercept tab (read-only)."""
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return _demo_intercept_status()
+        from ..service import intercept
+        return await _get(intercept.status, dctx)
+
+    @app.post("/api/intercept/ca/inspect")
+    async def intercept_ca_inspect(body: dict):
+        """Parse a PEM and report subject / fingerprints / legacy hash name.
+        Offline: no device, changes nothing, so it answers in demo mode too."""
+        from ..service import intercept
+        pem = body.get("pem")
+        if not isinstance(pem, str) or not pem.strip():
+            return _refuse("pem required")
+        try:
+            info = await asyncio.to_thread(intercept.inspect_ca, pem)
+        except ValueError as e:                 # unparseable / non-certificate PEM
+            return _refuse(str(e))
+        return {"ok": True, **info}             # the route owns the ok envelope
+
+    @app.post("/api/intercept/ca")
+    async def intercept_ca_install(body: dict):
+        """Install the operator's proxy CA into the device trust store
+        (version-aware; Android 14 overlays the Conscrypt apex)."""
+        if not body.get("confirm"):
+            return _refuse("installing a CA requires confirm=true")
+        pem = body.get("pem")
+        if not isinstance(pem, str) or not pem.strip():
+            return _refuse("pem required")
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import intercept
+        # install_ca parses the PEM, does the device work, emits the audit event
+        # and returns {ok, output, ca:{...}} (ok:false on bad input, never raises)
+        return await asyncio.to_thread(intercept.install_ca, dctx, pem)
+
+    @app.post("/api/intercept/ca/revert")
+    async def intercept_ca_revert(body: dict):
+        """Undo the CA install: tear down the overlay / remove the cert."""
+        if not body.get("confirm"):
+            return _refuse("reverting the CA requires confirm=true")
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import intercept
+        return await asyncio.to_thread(intercept.revert_ca, dctx)
+
+    @app.post("/api/intercept/proxy")
+    async def intercept_proxy(body: dict):
+        """Point the whole device (global) or one app (per-app transparent
+        redirect) at the proxy, or clear it (off)."""
+        if not body.get("confirm"):
+            return _refuse("changing the proxy requires confirm=true")
+        mode = body.get("mode")
+        if mode not in ("global", "per-app", "off"):
+            return _refuse("mode must be global, per-app or off")
+        # validate every device-bound string at the boundary before the service
+        # (which re-validates and shlex.quote-s before any adb call)
+        host = pkg = None
+        port: int | None = None
+        if mode in ("global", "per-app"):
+            h = body.get("host")
+            if not isinstance(h, str) or not _HOST_RE.match(h):
+                return _refuse("invalid host")
+            host = h
+            try:
+                port = int(body.get("port"))
+            except (TypeError, ValueError):
+                return _refuse("invalid port")
+            if not 1 <= port <= 65535:
+                return _refuse("port out of range")
+        if mode == "per-app":
+            p = body.get("package")
+            if not isinstance(p, str) or not PKG_RE.match(p):
+                return _refuse("invalid package name")
+            pkg = p
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import intercept
+        return await asyncio.to_thread(intercept.set_proxy, dctx, mode, host, port, pkg)
 
     # ---------- root / su ----------
     @app.get("/api/root")

@@ -34,6 +34,7 @@
     else if (currentTab === "radio") renderRadioLog();
     else if (currentTab === "network") { renderFlow(); renderDestTable(); }
     else if (currentTab === "appmgr") loadAppManager();
+    else if (currentTab === "intercept") loadIntercept();
   }
 
   /* ---------- theme ---------- */
@@ -59,6 +60,7 @@
     radio: ["Cellular & Radio", "Telephony state, serving cell and the radio log"],
     storage: ["Files & Storage", "Per-app storage, the file browser, and app extraction"],
     alerts: ["Alerts & Rules", "What tripped, and the detections watching your device"],
+    intercept: ["SSL Intercept", "Trust a proxy CA and point the device at it — authorized own-device testing"],
     devices: ["Devices & ADB", "Every device ADB sees, their state, and connection controls"],
   };
   var currentTab = "monitor";
@@ -76,6 +78,7 @@
     if (tab === "storage") loadStorage();
     if (tab === "devices") { loadDevices(); loadRootCard(); }
     if (tab === "appmgr") loadAppManager();
+    if (tab === "intercept") loadIntercept();
     if (tab === "network") { renderFlow(); renderDestTable(); }
     var gs = $("#gsearch");
     if (gs) {
@@ -2569,6 +2572,265 @@
       '<div class="hint">Role holders from the system role manager; click a name to open that app.</div></div>' +
       '<div class="empty">Pick an app on the left to see its permissions, components, app-ops, signature and storage, and to manage it.</div>';
   }
+
+  /* ---------- SSL interception (Intercept tab) ----------
+     Wired strictly to /api/intercept/*. GET /status is read-only; every active
+     POST carries {device:DEV, confirm:true} and refreshes status after. The
+     backend validates+quotes every device-bound string and owns the audit
+     event, so this stays a thin UI with clean error / loading states. */
+  var icStatus = null;      // last /status payload (or null after a failed load)
+  var icPkgsDev = null;     // device whose package datalist is loaded (lazy, per device)
+
+  function loadIntercept() {
+    loadInterceptStatus();
+    icLoadPkgs();           // fill the per-app target datalist from the app list
+  }
+
+  function loadInterceptStatus() {
+    var box = $("#ic-status");
+    if (box) box.innerHTML = '<div class="empty">loading status…</div>';
+    // amGet = getJSON(dq(url)) -> adds ?device=DEV; GET never changes the device
+    amGet("/api/intercept/status").then(function (s) {
+      icStatus = s || {};
+      renderInterceptStatus(icStatus);
+    }).catch(function () {
+      icStatus = null;
+      if (box) box.innerHTML = '<div class="empty">could not load interception status — is a device attached?</div>';
+      icReflectProxy({});   // keep the proxy card readable even when status failed
+    });
+  }
+
+  function icShortDate(iso) {       // cert / expiry timestamps -> YYYY-MM-DD, UTC-stable
+    if (!iso) return "—";
+    var d = new Date(iso);
+    return isNaN(d.getTime()) ? String(iso) : d.toISOString().slice(0, 10);
+  }
+
+  function renderInterceptStatus(s) {
+    var box = $("#ic-status");
+    if (!box) return;
+    s = s || {};
+    var chips = [];
+    if (s.demo) chips.push('<span class="pill mut">demo data</span>');
+    chips.push('<span class="pill ' + (s.root ? "good" : "warn") + '">root: ' + (s.root ? "yes" : "no") + "</span>");
+    var av = s.android ? ("Android " + esc(s.android)) : "Android ?";
+    chips.push('<span class="pill info">' + av + (s.sdk != null ? " · SDK " + esc(s.sdk) : "") + "</span>");
+
+    var ca = s.ca || {};
+    if (ca.installed) {
+      chips.push('<span class="pill good">CA installed' + (ca.store ? " · " + esc(ca.store) : "") + "</span>");
+    } else {
+      chips.push('<span class="pill mut">no CA installed</span>');
+    }
+
+    var px = s.proxy || {};
+    if (px.mode === "global") {
+      chips.push('<span class="pill warn">proxy: global ' + esc((px.host || "?") + ":" + (px.port || "?")) + "</span>");
+    } else if (px.mode === "per-app") {
+      chips.push('<span class="pill warn">proxy: ' + esc(shortApp(px.package)) + " " + esc((px.host || "?") + ":" + (px.port || "?")) + "</span>");
+    } else {
+      chips.push('<span class="pill mut">proxy off</span>');
+    }
+
+    var html = '<div class="ic-chips">' + chips.join(" ") + "</div>";
+
+    // CA detail (subject / sha256 / expiry) only when something is installed
+    if (ca.installed) {
+      var det = [];
+      if (ca.subject) det.push(["Subject", ca.subject]);
+      if (ca.sha256) det.push(["SHA-256", ca.sha256]);
+      if (ca.hash_name) det.push(["Trust-store file", ca.hash_name]);
+      if (ca.not_after) det.push(["Expires", icShortDate(ca.not_after)]);
+      if (det.length) {
+        html += '<dl class="kv2 ic-kv">' + det.map(function (r) {
+          return "<dt>" + esc(r[0]) + "</dt><dd>" + esc(r[1]) + "</dd>";
+        }).join("") + "</dl>";
+      }
+    }
+
+    // surface any per-probe errors the backend reported (one note each)
+    var errs = s.errors || {};
+    Object.keys(errs).forEach(function (k) {
+      html += '<div class="ic-err">' + esc(k) + ": " + esc(errs[k]) + "</div>";
+    });
+
+    box.innerHTML = html;
+
+    // Android 14 restart hint on the CA card
+    var hint14 = $(".ic-hint14");
+    if (hint14) hint14.style.display = (s.sdk === 34 || s.android === "14") ? "" : "none";
+
+    icReflectProxy(px);
+  }
+
+  // mirror the live proxy into the card: a state pill, the mode select, and the
+  // host/port/package inputs when they are still empty (so Apply reuses them)
+  function icReflectProxy(px) {
+    px = px || {};
+    var state = $("#ic-proxy-state");
+    if (state) {
+      var txt, cls;
+      if (px.mode === "global") { txt = "Global proxy → " + (px.host || "?") + ":" + (px.port || "?"); cls = "warn"; }
+      else if (px.mode === "per-app") {
+        txt = "Per-app proxy → " + (px.host || "?") + ":" + (px.port || "?") +
+          " (" + (px.package || "?") + (px.uid != null ? ", uid " + px.uid : "") + ")";
+        cls = "warn";
+      } else { txt = "Proxy is off."; cls = "mut"; }
+      state.innerHTML = '<span class="pill ' + cls + '">' + esc(txt) + "</span>";
+    }
+    var mode = $("#ic-mode");
+    if (mode && (px.mode === "global" || px.mode === "per-app" || px.mode === "off")) mode.value = px.mode;
+    var host = $("#ic-host"), port = $("#ic-port"), pkg = $("#ic-pkg");
+    if (host && !host.value && px.host) host.value = px.host;
+    if (port && !port.value && px.port) port.value = px.port;
+    if (pkg && !pkg.value && px.package) pkg.value = px.package;
+    icSyncMode();
+  }
+
+  function icSyncMode() {            // per-app target shown only in per-app mode
+    var mode = $("#ic-mode") ? $("#ic-mode").value : "off";
+    var pkgrow = $("#ic-pkgrow");
+    if (pkgrow) pkgrow.style.display = (mode === "per-app") ? "" : "none";
+    // host/port stay visible in every mode (Off simply ignores them) so the
+    // setup fields are never hidden when the device starts with no proxy
+  }
+
+  // target datalist from the app list (same source App Manager uses); lazy per device
+  function icLoadPkgs() {
+    if (icPkgsDev === DEV) return;
+    icPkgsDev = DEV;
+    var dl = $("#ic-pkglist");
+    if (!dl) return;
+    amGet("/api/appmanager/list?which=user").then(function (d) {
+      var apps = (d && d.apps) || [];
+      dl.innerHTML = apps.map(function (a) {
+        return '<option value="' + esc(a.package) + '">' + esc(a.label || a.package) + "</option>";
+      }).join("");
+    }).catch(function () { icPkgsDev = null; });  // retry on the next tab visit
+  }
+
+  function icReadPemFile(e) {        // FileReader -> textarea, client-side only
+    var f = e.target.files && e.target.files[0];
+    if (!f) return;
+    var rd = new FileReader();
+    rd.onload = function () {
+      var ta = $("#ic-pem");
+      if (ta) ta.value = String(rd.result || "");
+      toast("loaded " + f.name + " into the PEM box", "good");
+    };
+    rd.onerror = function () { toast("could not read the file", "warn"); };
+    rd.readAsText(f);
+    e.target.value = "";             // allow re-picking the same file
+  }
+
+  function icRenderInspect(j) {
+    var out = $("#ic-inspect-out");
+    if (!out) return;
+    var rows = [
+      ["Subject", j.subject], ["Issuer", j.issuer],
+      ["Valid from", icShortDate(j.not_before)], ["Valid to", icShortDate(j.not_after)],
+      ["SHA-256", j.sha256], ["SHA-1", j.sha1], ["Trust-store file", j.hash_name],
+      ["Is a CA", j.is_ca ? "yes" : "no — not a CA certificate"],
+    ];
+    out.style.display = "block";
+    out.innerHTML = (j.is_ca ? "" : '<div class="ic-err">This certificate is not a CA (is_ca=false); installing it may not establish trust for other certs.</div>') +
+      '<dl class="kv2 ic-kv">' + rows.map(function (r) {
+        return "<dt>" + esc(r[0]) + "</dt><dd>" + esc(r[1] == null ? "—" : r[1]) + "</dd>";
+      }).join("") + "</dl>";
+  }
+
+  function icInspect() {             // OFFLINE: no device, changes nothing
+    var pem = ($("#ic-pem") ? $("#ic-pem").value : "").trim();
+    if (!pem) { toast("paste the proxy CA PEM first", "warn"); return; }
+    var out = $("#ic-inspect-out");
+    if (out) { out.style.display = "block"; out.textContent = "inspecting…"; }
+    postJSON("/api/intercept/ca/inspect", { pem: pem }).then(function (res) {
+      var j = res.j || {};
+      if (!j.ok) {
+        if (out) out.innerHTML = '<div class="ic-err">' + esc(j.output || "not an X.509 certificate") + "</div>";
+        toast("inspect failed — " + (j.output || "not a certificate"), "warn");
+        return;
+      }
+      icRenderInspect(j);
+      if (!j.is_ca) toast("this certificate is not a CA (is_ca=false)", "warn");
+    }).catch(function () {
+      if (out) out.innerHTML = '<div class="ic-err">inspect request failed</div>';
+      toast("inspect request failed", "crit");
+    });
+  }
+
+  function icInstall() {
+    var pem = ($("#ic-pem") ? $("#ic-pem").value : "").trim();
+    if (!pem) { toast("paste the proxy CA PEM first", "warn"); return; }
+    if (typeof confirm === "function" && !confirm(
+      "Install this CA into the device trust store? It affects every non-pinning app on the device. " +
+      "Only on a device you own, for apps you are authorized to test. Use Revert when you are done.")) return;
+    postJSON("/api/intercept/ca", { device: DEV, pem: pem, confirm: true }).then(function (res) {
+      var j = res.j || {};
+      toast((j.ok ? "CA installed — " : "Install failed — ") + ((j.output || "").split("\n")[0] || ""), j.ok ? "good" : "warn");
+      if (j.ca) renderInterceptStatus(Object.assign({}, icStatus || {}, { ca: j.ca }));  // instant reflect
+      loadInterceptStatus();        // then re-poll the authoritative state
+    }).catch(function () { toast("install request failed", "crit"); });
+  }
+
+  function icRevert() {
+    if (typeof confirm === "function" && !confirm(
+      "Remove the proxy CA and tear down the trust-store overlay on the device? Continue?")) return;
+    postJSON("/api/intercept/ca/revert", { device: DEV, confirm: true }).then(function (res) {
+      var j = res.j || {};
+      toast((j.ok ? "CA reverted — " : "Revert failed — ") + ((j.output || "").split("\n")[0] || ""), j.ok ? "good" : "warn");
+      loadInterceptStatus();
+    }).catch(function () { toast("revert request failed", "crit"); });
+  }
+
+  var IC_HOST_RE = /^[A-Za-z0-9_.-]{1,255}$/;           // mirrors _HOST_RE server-side
+  var IC_PKG_RE = /^[A-Za-z0-9_][A-Za-z0-9_.]{1,254}$/; // mirrors _PKG server-side
+
+  function icApplyProxy() {
+    var mode = $("#ic-mode") ? $("#ic-mode").value : "off";
+    var host = ($("#ic-host") ? $("#ic-host").value : "").trim();
+    var portRaw = ($("#ic-port") ? $("#ic-port").value : "").trim();
+    var port = parseInt(portRaw, 10);
+    var pkg = ($("#ic-pkg") ? $("#ic-pkg").value : "").trim();
+    if (mode !== "off") {
+      if (!IC_HOST_RE.test(host)) { toast("enter a valid proxy host (IPv4 or hostname)", "warn"); return; }
+      if (!(port >= 1 && port <= 65535)) { toast("enter a valid port (1-65535)", "warn"); return; }
+    }
+    if (mode === "per-app" && !IC_PKG_RE.test(pkg)) { toast("pick a target package for per-app mode", "warn"); return; }
+    var what = mode === "off" ? "Turn the proxy off?" :
+      mode === "global" ? ("Point the whole device at " + host + ":" + port + "?") :
+      ("Redirect " + shortApp(pkg) + " through " + host + ":" + port + "?");
+    if (typeof confirm === "function" && !confirm(what + " Only on a device you own, for authorized testing.")) return;
+    var body = { device: DEV, mode: mode, confirm: true };
+    if (mode !== "off") { body.host = host; body.port = port; }
+    if (mode === "per-app") body.package = pkg;
+    postJSON("/api/intercept/proxy", body).then(function (res) {
+      var j = res.j || {};
+      toast((j.ok ? "proxy " + mode + " — " : "proxy change failed — ") + ((j.output || "").split("\n")[0] || ""), j.ok ? "good" : "warn");
+      if (j.proxy) icReflectProxy(j.proxy);
+      loadInterceptStatus();
+    }).catch(function () { toast("proxy request failed", "crit"); });
+  }
+
+  function icProxyOff() {            // quick off: reverting, so no extra dialog
+    postJSON("/api/intercept/proxy", { device: DEV, mode: "off", confirm: true }).then(function (res) {
+      var j = res.j || {};
+      toast((j.ok ? "proxy off — " : "could not turn proxy off — ") + ((j.output || "").split("\n")[0] || ""), j.ok ? "good" : "warn");
+      loadInterceptStatus();
+    }).catch(function () { toast("proxy request failed", "crit"); });
+  }
+
+  (function initIntercept() {        // DOM is present (script at end of body)
+    function on(id, fn, ev) { var e = $("#" + id); if (e) e.addEventListener(ev || "click", fn); }
+    on("ic-refresh", loadInterceptStatus);
+    on("ic-inspect", icInspect);
+    on("ic-install", icInstall);
+    on("ic-revert", icRevert);
+    on("ic-apply", icApplyProxy);
+    on("ic-proxyoff", icProxyOff);
+    on("ic-mode", icSyncMode, "change");
+    on("ic-pemfile", icReadPemFile, "change");
+  })();
 
   /* ================= product polish ================= */
 

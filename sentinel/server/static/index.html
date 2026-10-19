@@ -36,6 +36,7 @@
     <div class="navlabel">Defense</div>
     <nav class="nav" data-nav>
       <button data-tab="alerts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 0-6 6c0 5-2 6-2 6h16s-2-1-2-6a6 6 0 0 0-6-6Z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>Alerts &amp; Rules<span class="badge" id="abadge"></span></button>
+      <button data-tab="intercept"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="12" cy="12" r="2.6"/><path d="M7 12h2.4M14.6 12H17"/></svg>SSL Intercept</button>
       <button data-tab="devices"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M11 18h2"/></svg>Devices &amp; ADB<span class="badge" id="dbadge"></span></button>
     </nav>
     <div class="railfoot">All data stays on this machine.<br>Own-device monitoring only.</div>
@@ -52,6 +53,7 @@
       <button data-tab="radio">Cellular</button>
       <button data-tab="storage">Files</button>
       <button data-tab="alerts">Alerts</button>
+      <button data-tab="intercept">Intercept</button>
       <button data-tab="devices">Devices</button>
     </div>
 
@@ -469,6 +471,73 @@
         <div class="note">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
           <span>"waiting for device" almost always means the phone shows as <b>unauthorized</b> (tap Allow on the phone) or <b>offline</b> (Restart ADB). Each device below says exactly which.</span>
+        </div>
+      </section>
+
+      <!-- SSL INTERCEPT — CA trust + proxy wiring for authorized own-device testing -->
+      <section class="panel" data-panel="intercept">
+        <div class="note ic-auth">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2a3 3 0 0 0-3 3v2H8a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-1V5a3 3 0 0 0-3-3Zm-1 5V5a1 1 0 0 1 2 0v2h-2Z"/></svg>
+          <span>Use only on apps you are authorized to test, on a device you own. Installing a CA and proxying traffic affects the whole device; revert when done.</span>
+        </div>
+
+        <div class="card pad0 ic-card" style="margin-top:14px">
+          <div class="ch"><h3>Interception status</h3>
+            <span class="tiphint" data-tip="Live trust-store and proxy state for the selected device: whether su is available, the Android version, whether a proxy CA is in the trust store (and in which store — the Conscrypt apex on Android 14, or the legacy system store), and whether a proxy is set globally or for one app.">?</span>
+            <button class="btn" id="ic-refresh">Refresh</button></div>
+          <div class="ic-body"><div id="ic-status"><div class="empty">loading status…</div></div></div>
+        </div>
+
+        <div class="cols" style="margin-top:14px">
+          <div class="card pad0 ic-card">
+            <div class="ch"><h3>Proxy CA</h3><span class="hint">trust the Burp / mitmproxy cert</span></div>
+            <div class="ic-body">
+              <p class="ic-help">Paste the proxy's CA certificate (PEM) or load it from a file, inspect it, then install it into the device trust store so non-pinning apps trust the proxy.</p>
+              <textarea id="ic-pem" class="ic-pem mono" rows="7" spellcheck="false" autocomplete="off" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
+              <div class="ic-row">
+                <label class="btn ic-file">Load file…<input type="file" id="ic-pemfile" accept=".pem,.crt,.cer,.der,.txt" hidden></label>
+                <button class="btn" id="ic-inspect">Inspect</button>
+                <button class="btn p" id="ic-install">Install CA</button>
+                <button class="btn danger" id="ic-revert">Revert CA</button>
+              </div>
+              <div id="ic-inspect-out" class="ic-out" style="display:none"></div>
+              <div class="note ic-hint14" style="display:none">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+                <span>Android 14: the trust store is served from the Conscrypt APEX. An app that is already running may need to be restarted to pick up the new CA.</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="card pad0 ic-card">
+            <div class="ch"><h3>Proxy</h3><span class="hint">point the device or one app at the proxy</span></div>
+            <div class="ic-body">
+              <div id="ic-proxy-state" class="ic-pxstate"><span class="pill mut">proxy state loads with status</span></div>
+              <div class="ic-field" id="ic-hostrow">
+                <label class="ic-lbl">Proxy host<input id="ic-host" class="adbin" placeholder="192.168.1.10" autocomplete="off" spellcheck="false"></label>
+                <label class="ic-lbl ic-portlbl">Port<input id="ic-port" class="adbin" placeholder="8080" inputmode="numeric" autocomplete="off"></label>
+              </div>
+              <div class="ic-field">
+                <label class="ic-lbl">Mode<select id="ic-mode" class="devpick ic-mode">
+                  <option value="global">Global (whole device)</option>
+                  <option value="per-app">This app only</option>
+                  <option value="off">Off</option>
+                </select></label>
+              </div>
+              <div class="ic-field" id="ic-pkgrow" style="display:none">
+                <label class="ic-lbl">Target app<input id="ic-pkg" class="adbin" list="ic-pkglist" placeholder="com.example.app" autocomplete="off" spellcheck="false"></label>
+                <datalist id="ic-pkglist"></datalist>
+              </div>
+              <div class="ic-row">
+                <button class="btn p" id="ic-apply">Apply</button>
+                <button class="btn" id="ic-proxyoff">Turn proxy off</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="note">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+          <span>Every install, revert and proxy change runs on the selected device over your own ADB, asks for confirmation first, and is written to the audit log. Step 1 of the SSL interception module: trust &amp; proxy. Pinning bypass is a later phase.</span>
         </div>
       </section>
     </div>

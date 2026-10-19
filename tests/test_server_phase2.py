@@ -387,3 +387,128 @@ def test_run_sh_finds_the_installers_venv(tmp_path, where):
 
 def test_backup_jobs_route_lists_type(client):
     assert client.get("/api/backup/jobs").json() == []
+
+
+# ---------- SSL interception: CA trust + proxy wiring (Phase: step 1) ----------
+# These exercise the app.py routes only. The device-side work and PEM parsing
+# live in sentinel.service.intercept (a sibling module); the two offline inspect
+# cases importorskip it so the suite stays green until that module lands, then
+# run in full against it.
+
+_CA_SUBJECT_CN = "Sentinel Test Proxy CA"
+_INSPECT_KEYS = {"ok", "subject", "issuer", "sha256", "sha1", "hash_name",
+                 "not_before", "not_after", "is_ca"}
+
+
+def _self_signed_ca_pem() -> str:
+    """A real self-signed CA PEM, built inline so the inspect route has
+    something cryptography can actually parse (no fixture file on disk)."""
+    from datetime import datetime, timedelta, timezone
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _CA_SUBJECT_CN),
+                      x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Sentinel")])
+    now = datetime.now(timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=3650))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256()))
+    return cert.public_bytes(serialization.Encoding.PEM).decode()
+
+
+def test_intercept_status_demo_shape(client):
+    # the frontend binds to exactly this shape; keep it in lockstep
+    d = _ok(client, "/api/intercept/status")
+    assert d == {"demo": True, "root": True, "sdk": 34, "android": "14",
+                 "ca": {"installed": False, "subject": None, "sha256": None,
+                        "hash_name": None, "store": "apex", "not_after": None},
+                 "proxy": {"mode": "off", "host": None, "port": None,
+                           "package": None, "uid": None},
+                 "errors": {}}
+
+
+def test_intercept_ca_inspect_offline(client):
+    pytest.importorskip("sentinel.service.intercept")   # written by a sibling agent
+    r = client.post("/api/intercept/ca/inspect", json={"pem": _self_signed_ca_pem()})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert _INSPECT_KEYS <= set(d), d
+    assert d["ok"] is True
+    assert d["is_ca"] is True
+    assert d["hash_name"].endswith(".0")        # openssl subject_hash_old -> "<hash>.0"
+    assert _CA_SUBJECT_CN in (d["subject"] or "")
+    assert d["sha256"] and d["not_after"]       # present, format left to the service
+
+
+def test_intercept_ca_inspect_rejects_non_cert(client):
+    pytest.importorskip("sentinel.service.intercept")
+    r = client.post("/api/intercept/ca/inspect", json={"pem": "not a cert"})
+    assert r.status_code == 400 and r.json()["ok"] is False
+    # a missing PEM is refused by the route itself, before the service
+    r = client.post("/api/intercept/ca/inspect", json={})
+    assert r.status_code == 400 and r.json()["ok"] is False
+
+
+def test_intercept_ca_install_refused_in_demo(client):
+    # confirm given + a valid PEM, so the route clears confirm and PEM checks
+    # and lands on the demo gate (never importing the service)
+    r = client.post("/api/intercept/ca",
+                    json={"pem": _self_signed_ca_pem(), "confirm": True})
+    assert r.status_code == 400
+    assert r.json() == {"ok": False, "output": "needs a real device (not demo mode)"}
+
+
+def test_intercept_active_calls_need_confirm(client):
+    # the confirm gate comes first, so an un-confirmed active call always says so
+    for url, body in (("/api/intercept/ca", {"pem": "x"}),
+                      ("/api/intercept/ca/revert", {}),
+                      ("/api/intercept/proxy",
+                       {"mode": "global", "host": "127.0.0.1", "port": 8080})):
+        r = client.post(url, json=body)
+        assert r.status_code == 400, url
+        d = r.json()
+        assert d["ok"] is False and "confirm" in d["output"], url
+
+
+def test_intercept_proxy_validation(client):
+    # mode / host / port / package validated at the boundary (confirm set so the
+    # request reaches validation rather than being stopped at the confirm gate)
+    bad = [
+        {"mode": "sideways", "confirm": True},                            # unknown mode
+        {"mode": "global", "host": "bad;host", "port": 8080, "confirm": True},
+        {"mode": "global", "host": "10.0.0.1", "port": 0, "confirm": True},
+        {"mode": "global", "host": "10.0.0.1", "port": 99999, "confirm": True},
+        {"mode": "global", "host": "10.0.0.1", "port": "eighty", "confirm": True},
+        {"mode": "global", "host": "10.0.0.1", "confirm": True},          # missing port
+        {"mode": "per-app", "host": "10.0.0.1", "port": 8080,
+         "package": "com.x;rm", "confirm": True},                         # bad package
+    ]
+    for body in bad:
+        r = client.post("/api/intercept/proxy", json=body)
+        assert r.status_code == 400 and r.json()["ok"] is False, body
+    # well-formed requests pass validation and then hit the demo gate
+    for body in ({"mode": "off", "confirm": True},
+                 {"mode": "global", "host": "127.0.0.1", "port": 8080, "confirm": True},
+                 {"mode": "per-app", "host": "10.0.0.1", "port": 8080,
+                  "package": PKG, "confirm": True}):
+        r = client.post("/api/intercept/proxy", json=body)
+        assert r.status_code == 400
+        assert r.json() == {"ok": False, "output": "needs a real device (not demo mode)"}, body
+
+
+def test_intercept_csrf_guard_blocks_cross_origin(client):
+    for url, body in (("/api/intercept/ca", {"pem": "x", "confirm": True}),
+                      ("/api/intercept/ca/revert", {"confirm": True}),
+                      ("/api/intercept/proxy", {"mode": "off", "confirm": True}),
+                      ("/api/intercept/ca/inspect", {"pem": "x"})):
+        r = client.post(url, json=body, headers={"Origin": "http://evil.example"})
+        assert r.status_code == 403 and r.json() == {"error": "cross-origin request blocked"}, url
+    # the read endpoint stays reachable: GET is not guarded
+    assert client.get("/api/intercept/status",
+                      headers={"Origin": "http://evil.example"}).status_code == 200

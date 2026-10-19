@@ -21,7 +21,7 @@ from pathlib import Path
 
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, Form, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -213,6 +213,28 @@ def _demo_root() -> dict:
     return {"demo": True, "root": True, "su_path": "/debug_ramdisk/su",
             "manager": {"name": "Magisk", "version": "27.0:MAGISK:R (27000)"},
             "adbd_root": False, "selinux": "Enforcing", "use_su": True}
+
+
+def _demo_flows(package: str | None = None) -> list[dict]:
+    pkg = package or "com.whatsapp"
+    rows = [
+        (pkg, "POST", "https", "g.whatsapp.net", "/v1/login", 200, True),
+        (pkg, "GET", "https", "media.whatsapp.net", "/d/abc.enc", 200, False),
+        (pkg, "GET", "http", "graph.facebook.com", "/t?ev=app_open", 204, False),
+        (pkg, "GET", "https", "graph.facebook.com", "/me", 401, True),
+        ("com.wx.weatherpro", "GET", "http", "api.weatherpro.com", "/v1/now", 200, False),
+        ("com.wx.weatherpro", "POST", "https", "ads.doubleclick.net", "/x", 200, False),
+    ]
+    out = []
+    for i, (p, m, sch, host, path, st, auth) in enumerate(rows):
+        if package and p != package:
+            continue
+        out.append({"ts": 1760900000 + i, "package": p, "uid": 10000 + i, "method": m,
+                    "scheme": sch, "host": host, "path": path, "status": st,
+                    "req_bytes": 320, "resp_bytes": 1200, "duration_ms": 40 + i,
+                    "content_type": "application/json", "has_auth": auth,
+                    "flow_id": f"demo-{i}", "new_host": i < 4})
+    return out
 
 
 def _demo_controls(pkg: str) -> dict:
@@ -1379,8 +1401,218 @@ def create_app(cfg: Config) -> FastAPI:
         dctx = _dev(body.get("device"))
         if dctx is None or dctx.adb is None:
             return _demo_refuse()
-        from ..service import intercept
+        from ..service import engagement, intercept
+        try:  # an active engagement may restrict which app may be proxied
+            engagement.require_scope(hub, pkg=pkg)
+        except engagement.ScopeError as e:
+            return JSONResponse({"ok": False, "output": str(e)}, status_code=403)
         return await asyncio.to_thread(intercept.set_proxy, dctx, mode, host, port, pkg)
+
+    # ---------- engagement / scope gate ----------
+    @app.get("/api/engagement")
+    async def engagement_get():
+        from ..service import engagement
+        return {"current": engagement.current(hub), "list": engagement.list_engagements(hub)}
+
+    @app.post("/api/engagement")
+    async def engagement_create(body: dict):
+        from ..service import engagement
+        try:
+            return {"ok": True, "engagement": engagement.create(hub, body or {})}
+        except ValueError as e:
+            return _refuse(str(e))
+
+    @app.post("/api/engagement/activate")
+    async def engagement_activate(body: dict):
+        from ..service import engagement
+        try:
+            return {"ok": True, "current": engagement.set_active(hub, str((body or {}).get("id", "")))}
+        except ValueError as e:
+            return _refuse(str(e))
+
+    @app.post("/api/engagement/mode")
+    async def engagement_mode(body: dict):
+        from ..service import engagement
+        try:
+            return {"ok": True, "mode": engagement.set_mode(hub, str((body or {}).get("mode", "")))}
+        except ValueError as e:
+            return _refuse(str(e))
+
+    @app.post("/api/engagement/close")
+    async def engagement_close(body: dict):
+        from ..service import engagement
+        engagement.close(hub, str((body or {}).get("id", "")))
+        return {"ok": True}
+
+    # ---------- per-app request monitor ----------
+    def _req_filters(q) -> dict:
+        f = {}
+        for k in ("host", "path", "method", "status_class", "scheme"):
+            v = q.get(k)
+            if v:
+                f[k] = v
+        if q.get("has_auth") in ("1", "true", "True"):
+            f["has_auth"] = True
+        if q.get("new_host") in ("1", "true", "True"):
+            f["new_host"] = True
+        return f
+
+    @app.get("/api/requests")
+    async def requests_list(request: Request, device: str | None = None,
+                            package: str | None = None):
+        dctx = _dev(device)
+        from ..service import reqmon
+        if dctx is None or dctx.adb is None:
+            return {"demo": True, "flows": _demo_flows(package), "count": len(_demo_flows(package))}
+        f = _req_filters(request.query_params)
+        flows = await asyncio.to_thread(reqmon.list_flows, dctx, package, f)
+        return {"flows": flows, "count": len(flows)}
+
+    @app.get("/api/requests/endpoints")
+    async def requests_endpoints(device: str | None = None, package: str | None = None):
+        dctx = _dev(device)
+        from ..service import reqmon
+        if dctx is None or dctx.adb is None:
+            return {"demo": True, "endpoints": []}
+        return {"endpoints": await asyncio.to_thread(reqmon.endpoints, dctx, package)}
+
+    @app.get("/api/requests/export")
+    async def requests_export(device: str | None = None, package: str | None = None,
+                              format: str = "har"):
+        dctx = _dev(device)
+        from ..service import reqmon
+        if dctx is None or dctx.adb is None:
+            return _bad("export needs a real device")
+        try:
+            name, data = await asyncio.to_thread(reqmon.export, dctx, package, format)
+        except ValueError as e:
+            return _bad(str(e))
+        return Response(content=data, media_type="application/octet-stream",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @app.get("/api/requests/watches")
+    async def requests_watches(device: str | None = None):
+        dctx = _dev(device)
+        from ..service import reqmon
+        if dctx is None or dctx.adb is None:
+            return {"demo": True, "watches": []}
+        return {"watches": reqmon.list_watches(dctx)}
+
+    @app.post("/api/requests/watches")
+    async def requests_watch_add(body: dict):
+        dctx = _dev((body or {}).get("device"))
+        from ..service import reqmon
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        try:
+            w = reqmon.add_watch(dctx, str(body.get("name", "")), body.get("filter") or {},
+                                 body.get("package"), body.get("severity", "warn"))
+        except ValueError as e:
+            return _refuse(str(e))
+        return {"ok": True, "watch": w}
+
+    @app.post("/api/requests/watches/delete")
+    async def requests_watch_delete(body: dict):
+        dctx = _dev((body or {}).get("device"))
+        from ..service import reqmon
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        reqmon.delete_watch(dctx, str((body or {}).get("id", "")))
+        return {"ok": True}
+
+    @app.post("/api/_mitm_flow")
+    async def mitm_flow(body: dict):
+        # internal: the mitmdump addon POSTs each flow here
+        from ..service import mitm
+        await asyncio.to_thread(mitm.ingest, hub, (body or {}).get("device"),
+                                (body or {}).get("flow") or {})
+        return {"ok": True}
+
+    # ---------- mitmproxy bridge ----------
+    @app.get("/api/mitm/status")
+    async def mitm_status():
+        from ..service import mitm
+        return await asyncio.to_thread(mitm.status, hub)
+
+    @app.post("/api/mitm/start")
+    async def mitm_start(body: dict):
+        if not (body or {}).get("confirm"):
+            return _refuse("starting the proxy requires confirm=true")
+        try:
+            port = int((body or {}).get("port"))
+        except (TypeError, ValueError):
+            return _refuse("invalid port")
+        mode = (body or {}).get("mode", "regular")
+        from ..service import mitm
+        return await asyncio.to_thread(mitm.start, hub, port, mode, cfg.port)
+
+    @app.post("/api/mitm/stop")
+    async def mitm_stop():
+        from ..service import mitm
+        return await asyncio.to_thread(mitm.stop, hub)
+
+    # ---------- Frida unpinning ----------
+    @app.get("/api/frida/status")
+    async def frida_status(device: str | None = None):
+        dctx = _dev(device)
+        from ..service import frida_svc
+        if dctx is None or dctx.adb is None:
+            return {"demo": True, "host_frida": False, "host_version": None,
+                    "server_running": False, "server_version": None, "arch": "arm64-v8a"}
+        return await asyncio.to_thread(frida_svc.status, dctx)
+
+    @app.get("/api/frida/presets")
+    async def frida_presets():
+        from ..service import frida_svc
+        return {"presets": frida_svc.presets()}
+
+    @app.post("/api/frida/server")
+    async def frida_server(body: dict):
+        if not (body or {}).get("confirm"):
+            return _refuse("this requires confirm=true")
+        action = (body or {}).get("action")
+        if action not in ("start", "stop"):
+            return _refuse("action must be start or stop")
+        dctx = _dev((body or {}).get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import frida_svc
+        fn = frida_svc.start_server if action == "start" else frida_svc.stop_server
+        return await asyncio.to_thread(fn, dctx)
+
+    @app.post("/api/frida/unpin")
+    async def frida_unpin(body: dict):
+        if not (body or {}).get("confirm"):
+            return _refuse("unpinning requires confirm=true")
+        package = (body or {}).get("package")
+        if not isinstance(package, str) or not PKG_RE.match(package):
+            return _refuse("invalid package name")
+        dctx = _dev((body or {}).get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import engagement, frida_svc
+        try:
+            engagement.require_scope(hub, pkg=package)
+        except engagement.ScopeError as e:
+            return JSONResponse({"ok": False, "output": str(e)}, status_code=403)
+        return await asyncio.to_thread(
+            frida_svc.unpin, dctx, package, (body or {}).get("preset", "all"),
+            (body or {}).get("mode", "spawn"))
+
+    # ---------- Magisk cert module (offline build) ----------
+    @app.post("/api/intercept/ca/module")
+    async def intercept_ca_module(body: dict):
+        pem = (body or {}).get("pem")
+        if not pem:
+            return _refuse("pem required")
+        from ..service import certmodule
+        try:
+            name, data = await asyncio.to_thread(
+                certmodule.build_module, pem.encode() if isinstance(pem, str) else pem)
+        except ValueError as e:
+            return _refuse(str(e))
+        return Response(content=data, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     # ---------- root / su ----------
     @app.get("/api/root")

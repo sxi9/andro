@@ -82,6 +82,7 @@
     if (tab === "appmgr") loadAppManager();
     if (tab === "intercept") loadIntercept();
     if (tab === "requests") loadRequests();
+    if (tab === "console") loadConsole();
     if (tab === "network") { renderFlow(); renderDestTable(); }
     var gs = $("#gsearch");
     if (gs) {
@@ -3598,12 +3599,69 @@
       if (ev.data && ev.data.ip) alertedIPs[ev.data.ip] = 1;
       loadAlerts(); pollStatus();
     }
+    // the activity console shows what Sentinel ran on the device + its output
+    if (ev.kind === "app.action" || ev.kind === "intercept.action" ||
+        ev.kind === "alert" || ev.kind === "app.backup") {
+      consolePush(ev);
+    }
     if (ev.kind === "app.backup" && currentTab === "storage") loadBackups();
     if (ev.kind === "app.backup" && currentTab === "appmgr" && amSel) {  // one event per finished job
       amInvalidate(amSel);
       if (amTab === "backups" || amTab === "storage") amShowTab(amTab);
     }
   }
+
+  /* ================= activity console ================= */
+  var conLog = [], conPaused = false, conMax = 500;
+  function consolePush(ev) {
+    conLog.push(ev);
+    if (conLog.length > conMax) conLog = conLog.slice(-conMax);
+    if (currentTab === "console" && !conPaused) conRender(ev);
+  }
+  function conGroup(ev) {
+    if (ev.kind === "intercept.action") return "intercept";
+    if (ev.kind === "app.action") return "app";
+    if (ev.kind === "alert") return "alert";
+    return ev.kind.split(".")[0];
+  }
+  function conLineHtml(ev) {
+    var d = ev.data || {};
+    var ok = d.ok;
+    var sev = ev.kind === "alert" ? "crit" : (ok === false ? "warn" : (ok ? "good" : "mut"));
+    var grp = conGroup(ev);
+    var head = '<span class="con-t">' + esc(fmtTime(ev.ts)) + "</span> " +
+      '<span class="con-g con-' + sev + '">' + esc(grp) + "</span> " +
+      '<span class="con-ti">' + esc(ev.title || ev.kind) + "</span>";
+    var out = d.output || ev.detail || "";
+    var body = out ? '\n<span class="con-out">' + esc(String(out).replace(/\s+$/, "")) + "</span>" : "";
+    return '<div class="con-line">' + head + body + "</div>";
+  }
+  function conRender(ev) {
+    var box = $("#con-log");
+    if (!box) return;
+    if (ev) {
+      if (box.querySelector(".con-dim")) box.innerHTML = "";
+      box.insertAdjacentHTML("beforeend", conLineHtml(ev));
+    } else {
+      var f = $("#con-filter") ? $("#con-filter").value : "";
+      var rows = conLog.filter(function (e) { return !f || conGroup(e) === f; });
+      box.innerHTML = rows.length
+        ? rows.map(conLineHtml).join("")
+        : '<span class="con-dim">no activity yet for this filter.</span>';
+    }
+    if ($("#con-auto") && $("#con-auto").checked) box.scrollTop = box.scrollHeight;
+  }
+  function loadConsole() { conRender(null); }
+  (function initConsole() {
+    function on(id, fn, ev) { var e = $("#" + id); if (e) e.addEventListener(ev || "click", fn); }
+    on("con-clear", function () { conLog = []; conRender(null); });
+    on("con-pause", function () {
+      conPaused = !conPaused;
+      this.textContent = conPaused ? "Resume" : "Pause";
+      if (!conPaused) conRender(null);
+    });
+    on("con-filter", function () { conRender(null); }, "change");
+  })();
 
   var wsRetry = 1000;
   function connectWS() {

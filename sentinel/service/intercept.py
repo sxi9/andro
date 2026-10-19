@@ -125,9 +125,9 @@ def _emit(dctx, *, action: str, ok: bool, what: str, detail: str, **extra) -> No
     if not callable(emit):
         return
     data = {"action": action, "ok": bool(ok)}
-    for k in ("host", "port", "package", "store"):
+    for k in ("host", "port", "package", "store", "output"):
         if extra.get(k) is not None:
-            data[k] = extra[k]
+            data[k] = str(extra[k])[:400] if k == "output" else extra[k]
     try:
         emit(Event(kind="intercept.action", severity=SEV_NOTICE if ok else SEV_WARN,
                    title=f"{what}: {detail}", detail=str(detail)[:200], data=data))
@@ -323,7 +323,7 @@ def install_ca(dctx, pem_bytes) -> dict:
         _put_snapshot(dctx, "intercept_ca", snap)
         ca = {"installed": True, **snap}
     _emit(dctx, action="ca.install", ok=ok, what="CA install",
-          detail=info["subject"], store=store)
+          detail=info["subject"], store=store, output=out)
     return {"ok": ok, "output": out or ("installed" if ok else "install failed"), "ca": ca}
 
 
@@ -357,7 +357,7 @@ def revert_ca(dctx) -> dict:
     if ok:
         _put_snapshot(dctx, "intercept_ca", {})
     _emit(dctx, action="ca.revert", ok=ok, what="CA revert",
-          detail="trust store restored")
+          detail="trust store restored", output=out)
     return {"ok": ok, "output": out or "reverted"}
 
 
@@ -497,7 +497,7 @@ def set_proxy(dctx, mode, host=None, port=None, package=None) -> dict:
         new, hooked = {"mode": "global", "host": host, "port": port,
                        "package": None, "uid": None}, []
         _emit(dctx, action="proxy.global", ok=ok, what="Proxy",
-              detail=f"global {host}:{port}", host=host, port=port)
+              detail=f"global {host}:{port}", host=host, port=port, output=out)
 
     elif mode == "per-app":
         try:
@@ -508,7 +508,7 @@ def set_proxy(dctx, mode, host=None, port=None, package=None) -> dict:
         new, hooked = {"mode": "per-app", "host": host, "port": port,
                        "package": package, "uid": int(uid)}, [int(uid)]
         _emit(dctx, action="proxy.per-app", ok=ok, what="Proxy",
-              detail=f"{package} -> {host}:{port}", host=host, port=port, package=package)
+              detail=f"{package} -> {host}:{port}", host=host, port=port, package=package, output=out)
 
     else:  # off: the chain + every jump are already gone (teardown above);
            # just clear the global setting
@@ -519,7 +519,7 @@ def set_proxy(dctx, mode, host=None, port=None, package=None) -> dict:
             out, ok = str(e), False
         out = (teardown + "\n" + out).strip()
         new, hooked = _empty_proxy(), []
-        _emit(dctx, action="proxy.off", ok=ok, what="Proxy", detail="cleared")
+        _emit(dctx, action="proxy.off", ok=ok, what="Proxy", detail="cleared", output=out)
 
     if ok:
         # the snapshot tracks hooked_uids for teardown; the returned block does not

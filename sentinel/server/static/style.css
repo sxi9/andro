@@ -579,3 +579,17 @@ tbody tr.rowlink{cursor:pointer}
 .rq-watch{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--border-soft)}
 .rq-watch .fn{flex:1;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rq-det{white-space:pre-wrap;word-break:break-all;font-size:10.5px;color:var(--fg-mut);max-height:200px;overflow:auto;padding:8px 15px;margin:0}
+
+/* ---- activity console ---- */
+.con-log{margin:0;padding:12px 15px;max-height:640px;overflow:auto;font-size:11.5px;line-height:1.5;
+  white-space:pre-wrap;word-break:break-word;background:var(--bg);color:var(--fg-dim)}
+.con-line{padding:2px 0;border-bottom:1px solid var(--border-soft)}
+.con-t{color:var(--fg-mut);font-size:10.5px}
+.con-g{display:inline-block;min-width:66px;font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.05em}
+.con-ti{color:var(--fg)}
+.con-out{display:block;color:var(--fg-mut);padding-left:12px}
+.con-good{color:var(--good,#36c48e)}
+.con-warn{color:var(--warn,#e0a53a)}
+.con-crit{color:var(--crit,#e5544b)}
+.con-mut{color:var(--fg-mut)}
+.con-dim{color:var(--fg-mut)}

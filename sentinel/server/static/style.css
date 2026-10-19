@@ -561,3 +561,21 @@ tbody tr.rowlink{cursor:pointer}
 .ic-portlbl{flex:0 0 110px;min-width:90px}
 .ic-mode{margin-left:0;max-width:none;width:100%}
 .ic-hint14{margin-top:11px}
+
+/* ---- wave 2: engagement, requests, frida/mitm ---- */
+.eng-card .ic-row{flex-wrap:wrap}
+.eng-form{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border-soft)}
+.eng-form .ic-lbl{display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--fg-mut)}
+.chk{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--fg-dim);white-space:nowrap}
+.cols-split{display:flex;gap:14px;align-items:flex-start}
+@media (max-width:980px){.cols-split{flex-direction:column}.cols-split .card{width:auto!important;flex:1 1 auto!important}}
+.rq-filters{flex-wrap:wrap;gap:6px}
+.rq-filters .adbin,.rq-filters .devpick{max-width:160px}
+.rq-row{display:flex;gap:9px;align-items:center;padding:8px 15px;border-bottom:1px solid var(--border-soft);cursor:pointer;font-size:12px}
+.rq-row:hover{background:var(--bg-elev)}
+.rq-row .rq-host{font-family:var(--ff-mono);font-size:11.5px;color:var(--fg);white-space:nowrap}
+.rq-row .rq-path{font-family:var(--ff-mono);font-size:11px;color:var(--fg-mut);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rq-row .rq-st{font-family:var(--ff-mono);font-size:11px;color:var(--fg-dim)}
+.rq-watch{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--border-soft)}
+.rq-watch .fn{flex:1;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rq-det{white-space:pre-wrap;word-break:break-all;font-size:10.5px;color:var(--fg-mut);max-height:200px;overflow:auto;padding:8px 15px;margin:0}

@@ -37,6 +37,7 @@
     <nav class="nav" data-nav>
       <button data-tab="alerts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 0-6 6c0 5-2 6-2 6h16s-2-1-2-6a6 6 0 0 0-6-6Z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>Alerts &amp; Rules<span class="badge" id="abadge"></span></button>
       <button data-tab="intercept"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="12" cy="12" r="2.6"/><path d="M7 12h2.4M14.6 12H17"/></svg>SSL Intercept</button>
+      <button data-tab="requests"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Requests</button>
       <button data-tab="devices"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M11 18h2"/></svg>Devices &amp; ADB<span class="badge" id="dbadge"></span></button>
     </nav>
     <div class="railfoot">All data stays on this machine.<br>Own-device monitoring only.</div>
@@ -54,6 +55,7 @@
       <button data-tab="storage">Files</button>
       <button data-tab="alerts">Alerts</button>
       <button data-tab="intercept">Intercept</button>
+      <button data-tab="requests">Requests</button>
       <button data-tab="devices">Devices</button>
     </div>
 
@@ -481,6 +483,28 @@
           <span>Use only on apps you are authorized to test, on a device you own. Installing a CA and proxying traffic affects the whole device; revert when done.</span>
         </div>
 
+        <div class="card pad0 ic-card eng-card" style="margin-top:14px">
+          <div class="ch"><h3>Engagement</h3>
+            <span class="tiphint" data-tip="An engagement records who authorized the work and what is in scope (app packages and hosts). When one is active, device-changing actions refuse out-of-scope targets and observe mode, and every action is audit-logged. With no engagement active, own-device use is unrestricted.">?</span>
+            <span class="hint" id="eng-state">no engagement — own-device mode</span></div>
+          <div class="ic-body">
+            <div class="ic-row">
+              <select id="eng-pick" class="devpick"></select>
+              <button class="btn" id="eng-mode" title="Toggle observe / active">mode</button>
+              <button class="btn" id="eng-new">New engagement…</button>
+            </div>
+            <div id="eng-form" class="eng-form" style="display:none">
+              <label class="ic-lbl">Name<input id="eng-name" class="adbin" placeholder="Acme bug bounty" autocomplete="off"></label>
+              <label class="ic-lbl">Authorization ref<input id="eng-auth" class="adbin" placeholder="program URL / SOW" autocomplete="off"></label>
+              <label class="ic-lbl">In-scope packages<textarea id="eng-pkgs" class="ic-pem mono" rows="2" placeholder="com.target&#10;com.target.*"></textarea></label>
+              <label class="ic-lbl">In-scope hosts / CIDRs<textarea id="eng-hosts" class="ic-pem mono" rows="2" placeholder="*.target.com&#10;10.0.0.0/24"></textarea></label>
+              <label class="ic-lbl">Deny<textarea id="eng-deny" class="ic-pem mono" rows="1" placeholder="prod.target.com"></textarea></label>
+              <div class="ic-row"><button class="btn p" id="eng-create">Create &amp; activate</button>
+                <button class="btn" id="eng-cancel">Cancel</button></div>
+            </div>
+          </div>
+        </div>
+
         <div class="card pad0 ic-card" style="margin-top:14px">
           <div class="ch"><h3>Interception status</h3>
             <span class="tiphint" data-tip="Live trust-store and proxy state for the selected device: whether su is available, the Android version, whether a proxy CA is in the trust store (and in which store — the Conscrypt apex on Android 14, or the legacy system store), and whether a proxy is set globally or for one app.">?</span>
@@ -499,6 +523,7 @@
                 <button class="btn" id="ic-inspect">Inspect</button>
                 <button class="btn p" id="ic-install">Install CA</button>
                 <button class="btn danger" id="ic-revert">Revert CA</button>
+                <button class="btn" id="ic-camodule" title="Build a flashable Magisk module so the CA survives reboot and reaches apps without a restart">Magisk module…</button>
               </div>
               <div id="ic-inspect-out" class="ic-out" style="display:none"></div>
               <div class="note ic-hint14" style="display:none">
@@ -535,9 +560,85 @@
           </div>
         </div>
 
+        <div class="cols" style="margin-top:14px">
+          <div class="card pad0 ic-card">
+            <div class="ch"><h3>Bypass pinning (Frida)</h3><span class="hint">for apps that still refuse the proxy</span></div>
+            <div class="ic-body">
+              <p class="ic-help">If an app rejects the proxy after the CA is trusted, it pins. Run a Frida unpinning preset against that one in-scope app. Needs frida-tools on this computer and frida-server on the phone.</p>
+              <div id="fr-status"><span class="pill mut">frida state loads with status</span></div>
+              <div class="ic-row">
+                <button class="btn" id="fr-start" title="Start frida-server on the device">Start server</button>
+                <button class="btn" id="fr-stop">Stop server</button>
+              </div>
+              <div class="ic-field">
+                <label class="ic-lbl">Target app<input id="fr-pkg" class="adbin" list="ic-pkglist" placeholder="com.example.app" autocomplete="off" spellcheck="false"></label>
+              </div>
+              <div class="ic-field ic-row">
+                <label class="ic-lbl">Preset<select id="fr-preset" class="devpick"></select></label>
+                <label class="ic-lbl">Mode<select id="fr-mode" class="devpick">
+                  <option value="spawn">Spawn (catch startup)</option>
+                  <option value="attach">Attach (running)</option>
+                </select></label>
+              </div>
+              <div class="ic-row"><button class="btn p" id="fr-unpin">Unpin app</button></div>
+              <div id="fr-out" class="ic-out" style="display:none"></div>
+            </div>
+          </div>
+
+          <div class="card pad0 ic-card">
+            <div class="ch"><h3>mitmproxy</h3><span class="hint">capture flows into the Requests tab</span></div>
+            <div class="ic-body">
+              <p class="ic-help">Run a mitmproxy on this computer and point the device proxy at it (above). Flows stream into the Requests tab per app. Needs mitmproxy installed here.</p>
+              <div id="mitm-status"><span class="pill mut">mitm state loads…</span></div>
+              <div class="ic-field ic-row">
+                <label class="ic-lbl ic-portlbl">Port<input id="mitm-port" class="adbin" placeholder="8080" inputmode="numeric" autocomplete="off"></label>
+                <label class="ic-lbl">Mode<select id="mitm-mode" class="devpick">
+                  <option value="regular">Regular</option>
+                  <option value="transparent">Transparent</option>
+                </select></label>
+              </div>
+              <div class="ic-row">
+                <button class="btn p" id="mitm-start">Start</button>
+                <button class="btn" id="mitm-stop">Stop</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="note">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
-          <span>Every install, revert and proxy change runs on the selected device over your own ADB, asks for confirmation first, and is written to the audit log. Step 1 of the SSL interception module: trust &amp; proxy. Pinning bypass is a later phase.</span>
+          <span>Every install, revert, proxy change and unpin runs on the selected device over your own ADB, asks for confirmation first, is bounded by the active engagement's scope, and is written to the audit log.</span>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="requests">
+        <div class="cols cols-split">
+          <div class="card pad0" style="flex:1">
+            <div class="ch"><h3>Requests</h3>
+              <span class="tiphint" data-tip="Per-app HTTP requests captured through the proxy (mitmproxy). Pick an app, filter, and save a filter as a watch to get an alert when it matches (cleartext, token in a URL, a tracker host, a 4xx burst).">?</span>
+              <input id="rq-pkg" class="adbin" list="rq-pkglist" placeholder="app package…" autocomplete="off" style="max-width:220px">
+              <datalist id="rq-pkglist"></datalist>
+              <button class="btn" id="rq-refresh">Refresh</button>
+            </div>
+            <div class="toolbar rq-filters">
+              <input id="rq-host" class="adbin" placeholder="host contains…" autocomplete="off">
+              <input id="rq-path" class="adbin" placeholder="path regex…" autocomplete="off">
+              <select id="rq-method" class="devpick"><option value="">any method</option><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select>
+              <select id="rq-status" class="devpick"><option value="">any status</option><option value="2xx">2xx</option><option value="3xx">3xx</option><option value="4xx">4xx</option><option value="5xx">5xx</option></select>
+              <select id="rq-scheme" class="devpick"><option value="">any scheme</option><option value="http">http (cleartext)</option><option value="https">https</option></select>
+              <label class="chk"><input type="checkbox" id="rq-auth">has auth</label>
+              <label class="chk"><input type="checkbox" id="rq-new">new host</label>
+              <button class="btn" id="rq-watch" title="Save this filter as a watch that raises an alert on a match">Save as watch</button>
+              <select id="rq-export" class="devpick"><option value="">export…</option><option value="har">HAR</option><option value="csv">CSV</option><option value="json">JSON</option></select>
+              <button class="btn" id="rq-endpoints" title="Show the deduped endpoint map for this app">Endpoints</button>
+            </div>
+            <div id="rq-count" class="hint" style="padding:6px 15px;border-bottom:1px solid var(--border-soft)"></div>
+            <div id="rq-list" class="applist" style="max-height:620px"><div class="empty">pick an app, or start mitmproxy and drive the app</div></div>
+          </div>
+          <div class="card pad0" style="width:340px;flex:0 0 340px">
+            <div class="ch"><h3>Watches</h3></div>
+            <div id="rq-watches" class="ic-body"><div class="empty">no watches</div></div>
+          </div>
         </div>
       </section>
     </div>

@@ -35,6 +35,7 @@
     else if (currentTab === "network") { renderFlow(); renderDestTable(); }
     else if (currentTab === "appmgr") loadAppManager();
     else if (currentTab === "intercept") loadIntercept();
+    else if (currentTab === "requests") loadRequests();
   }
 
   /* ---------- theme ---------- */
@@ -61,6 +62,7 @@
     storage: ["Files & Storage", "Per-app storage, the file browser, and app extraction"],
     alerts: ["Alerts & Rules", "What tripped, and the detections watching your device"],
     intercept: ["SSL Intercept", "Trust a proxy CA and point the device at it — authorized own-device testing"],
+    requests: ["Requests", "Per-app HTTP requests through the proxy, filtered, with watches"],
     devices: ["Devices & ADB", "Every device ADB sees, their state, and connection controls"],
   };
   var currentTab = "monitor";
@@ -79,6 +81,7 @@
     if (tab === "devices") { loadDevices(); loadRootCard(); }
     if (tab === "appmgr") loadAppManager();
     if (tab === "intercept") loadIntercept();
+    if (tab === "requests") loadRequests();
     if (tab === "network") { renderFlow(); renderDestTable(); }
     var gs = $("#gsearch");
     if (gs) {
@@ -2584,6 +2587,9 @@
   function loadIntercept() {
     loadInterceptStatus();
     icLoadPkgs();           // fill the per-app target datalist from the app list
+    loadEngagement();
+    loadFridaCard();
+    loadMitmCard();
   }
 
   function loadInterceptStatus() {
@@ -2820,6 +2826,141 @@
     }).catch(function () { toast("proxy request failed", "crit"); });
   }
 
+  /* ===== engagement / scope gate ===== */
+  var engCur = null;
+  function loadEngagement() {
+    getJSON("/api/engagement").then(function (d) {
+      engCur = d.current;
+      var st = $("#eng-state");
+      if (st) st.textContent = engCur
+        ? (engCur.name + " · " + engCur.mode + " mode")
+        : "no engagement — own-device mode";
+      var pick = $("#eng-pick");
+      if (pick) {
+        var opts = ['<option value="">— no engagement —</option>'];
+        (d.list || []).forEach(function (e) {
+          opts.push('<option value="' + esc(e.id) + '"' + (e.active ? " selected" : "") +
+                    ">" + esc(e.name) + "</option>");
+        });
+        pick.innerHTML = opts.join("");
+      }
+      var mb = $("#eng-mode");
+      if (mb) mb.textContent = engCur ? (engCur.mode === "active" ? "→ observe" : "→ active") : "mode";
+    }).catch(function () {});
+  }
+  function engReload() { loadEngagement(); }
+  (function initEngagement() {
+    function on(id, fn, ev) { var e = $("#" + id); if (e) e.addEventListener(ev || "click", fn); }
+    on("eng-pick", function () {
+      var id = this.value;
+      if (!id) return;
+      postJSON("/api/engagement/activate", { id: id }).then(engReload)
+        .then(function () { toast("engagement activated", "good"); });
+    }, "change");
+    on("eng-mode", function () {
+      if (!engCur) { toast("create an engagement first", "warn"); return; }
+      var next = engCur.mode === "active" ? "observe" : "active";
+      postJSON("/api/engagement/mode", { mode: next }).then(engReload);
+    });
+    on("eng-new", function () { var f = $("#eng-form"); if (f) f.style.display = ""; });
+    on("eng-cancel", function () { var f = $("#eng-form"); if (f) f.style.display = "none"; });
+    on("eng-create", function () {
+      var body = {
+        name: ($("#eng-name").value || "").trim(),
+        authorization_ref: ($("#eng-auth").value || "").trim(),
+        scope_packages: ($("#eng-pkgs").value || ""),
+        scope_hosts: ($("#eng-hosts").value || ""),
+        deny: ($("#eng-deny").value || ""),
+      };
+      if (!body.name) { toast("an engagement needs a name", "warn"); return; }
+      postJSON("/api/engagement", body).then(function (r) {
+        if (r.ok === false) { toast(r.output || "could not create", "warn"); return; }
+        $("#eng-form").style.display = "none";
+        toast("engagement created & active", "good");
+        engReload();
+      }).catch(function () { toast("request failed", "crit"); });
+    });
+  })();
+
+  /* ===== Frida unpinning ===== */
+  function loadFridaCard() {
+    var sel = $("#fr-preset");
+    if (sel && !sel.dataset.filled) {
+      getJSON("/api/frida/presets").then(function (d) {
+        sel.innerHTML = (d.presets || []).map(function (p) {
+          return '<option value="' + esc(p.id) + '">' + esc(p.title) + "</option>";
+        }).join("");
+        sel.dataset.filled = "1";
+      }).catch(function () {});
+    }
+    amGet("/api/frida/status").then(function (s) {
+      var box = $("#fr-status");
+      if (!box) return;
+      box.innerHTML = [
+        pill(s.host_frida ? "good" : "warn", s.host_frida ? "frida on host" : "no frida-tools here"),
+        pill(s.server_running ? "good" : "mut", s.server_running ? "server running" : "server stopped"),
+        s.arch ? pill("mut", esc(s.arch)) : "",
+      ].join(" ");
+    }).catch(function () {});
+  }
+  function fridaServer(action) {
+    var dctx = DEV;
+    postJSON("/api/frida/server", { device: dctx, action: action, confirm: true })
+      .then(function (r) {
+        toast((r.ok ? "" : "failed: ") + (r.output || action), r.ok ? "good" : "warn");
+        loadFridaCard();
+      }).catch(function () { toast("request failed", "crit"); });
+  }
+  (function initFrida() {
+    function on(id, fn) { var e = $("#" + id); if (e) e.addEventListener("click", fn); }
+    on("fr-start", function () { fridaServer("start"); });
+    on("fr-stop", function () { fridaServer("stop"); });
+    on("fr-unpin", function () {
+      var pkg = ($("#fr-pkg").value || "").trim();
+      if (!pkg) { toast("pick a target app", "warn"); return; }
+      if (typeof confirm === "function" &&
+          !confirm("Run a pinning-bypass on " + shortApp(pkg) + "? Only on an app you are authorized to test.")) return;
+      var out = $("#fr-out");
+      if (out) { out.style.display = ""; out.textContent = "running…"; }
+      postJSON("/api/frida/unpin", {
+        device: DEV, package: pkg, preset: $("#fr-preset").value || "all",
+        mode: $("#fr-mode").value || "spawn", confirm: true,
+      }).then(function (r) {
+        if (out) out.textContent = (r.bypassed ? "✓ pinning bypassed\n" : (r.ok ? "script loaded\n" : "")) + (r.output || "");
+        toast(r.bypassed ? "pinning bypassed" : (r.ok ? "script loaded" : "failed: " + (r.output || "").split("\n")[0]),
+              r.bypassed ? "good" : (r.ok ? "" : "warn"));
+      }).catch(function () { if (out) out.textContent = "request failed"; toast("request failed", "crit"); });
+    });
+  })();
+
+  /* ===== mitmproxy ===== */
+  function loadMitmCard() {
+    getJSON("/api/mitm/status").then(function (s) {
+      var box = $("#mitm-status");
+      if (!box) return;
+      box.innerHTML = [
+        pill(s.installed ? "good" : "warn", s.installed ? "mitmproxy installed" : "not installed (pip install mitmproxy)"),
+        pill(s.running ? "good" : "mut", s.running ? ("running on " + s.port) : "stopped"),
+      ].join(" ");
+    }).catch(function () {});
+  }
+  (function initMitm() {
+    function on(id, fn) { var e = $("#" + id); if (e) e.addEventListener("click", fn); }
+    on("mitm-start", function () {
+      var port = parseInt($("#mitm-port").value, 10);
+      if (!(port >= 1 && port <= 65535)) { toast("enter a port", "warn"); return; }
+      postJSON("/api/mitm/start", { port: port, mode: $("#mitm-mode").value || "regular", confirm: true })
+        .then(function (r) { toast(r.output || (r.ok ? "started" : "failed"), r.ok ? "good" : "warn"); loadMitmCard(); })
+        .catch(function () { toast("request failed", "crit"); });
+    });
+    on("mitm-stop", function () {
+      postJSON("/api/mitm/stop", {}).then(function (r) { toast(r.output || "stopped", "good"); loadMitmCard(); })
+        .catch(function () { toast("request failed", "crit"); });
+    });
+  })();
+
+  function pill(cls, text) { return '<span class="pill ' + cls + '">' + text + "</span>"; }
+
   (function initIntercept() {        // DOM is present (script at end of body)
     function on(id, fn, ev) { var e = $("#" + id); if (e) e.addEventListener(ev || "click", fn); }
     on("ic-refresh", loadInterceptStatus);
@@ -2830,6 +2971,153 @@
     on("ic-proxyoff", icProxyOff);
     on("ic-mode", icSyncMode, "change");
     on("ic-pemfile", icReadPemFile, "change");
+    on("ic-camodule", icCaModule);
+  })();
+
+  function icCaModule() {
+    var pem = ($("#ic-pem").value || "").trim();
+    if (!pem) { toast("paste the CA PEM first", "warn"); return; }
+    // POST then download the returned zip
+    fetch("/api/intercept/ca/module", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pem: pem }),
+    }).then(function (r) {
+      if (!r.ok) return r.json().then(function (j) { throw new Error(j.output || "failed"); });
+      return r.blob();
+    }).then(function (blob) {
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "sentinel-ca-module.zip";
+      document.body.appendChild(a); a.click(); a.remove();
+      toast("Magisk module downloaded", "good", "flash it in Magisk so the CA survives reboot");
+    }).catch(function (e) { toast(e.message || "could not build module", "warn"); });
+  }
+
+  /* ================= requests monitor ================= */
+  var rqRows = [];
+  function rqFilters() {
+    var q = {};
+    var h = ($("#rq-host").value || "").trim(); if (h) q.host = h;
+    var p = ($("#rq-path").value || "").trim(); if (p) q.path = p;
+    var m = $("#rq-method").value; if (m) q.method = m;
+    var s = $("#rq-status").value; if (s) q.status_class = s;
+    var sc = $("#rq-scheme").value; if (sc) q.scheme = sc;
+    if ($("#rq-auth").checked) q.has_auth = "1";
+    if ($("#rq-new").checked) q.new_host = "1";
+    return q;
+  }
+  function rqUrl(base) {
+    var pkg = ($("#rq-pkg").value || "").trim();
+    var q = rqFilters();
+    var parts = [];
+    if (pkg) parts.push("package=" + encodeURIComponent(pkg));
+    Object.keys(q).forEach(function (k) { parts.push(k + "=" + encodeURIComponent(q[k])); });
+    return base + (parts.length ? "?" + parts.join("&") : "");
+  }
+  function loadRequests() {
+    rqLoadPkgs();
+    amGet(rqUrl("/api/requests")).then(function (d) {
+      rqRows = d.flows || [];
+      renderRequests(d);
+    }).catch(function () {
+      $("#rq-list").innerHTML = '<div class="empty">could not load requests</div>';
+    });
+    loadWatches();
+  }
+  function renderRequests(d) {
+    var c = $("#rq-count");
+    if (c) c.textContent = (d.demo ? "demo · " : "") + d.count + " requests" +
+      (($("#rq-pkg").value || "").trim() ? " for this app" : "");
+    $("#rq-list").innerHTML = rqRows.map(function (r, i) {
+      var cls = r.scheme === "http" ? "crit" : ((r.status || 0) >= 400 ? "warn" : "good");
+      return '<div class="rq-row" data-i="' + i + '">' +
+        '<span class="pill ' + cls + '">' + esc(r.method) + "</span>" +
+        '<span class="rq-host">' + esc(r.host) + '</span>' +
+        '<span class="rq-path">' + esc(r.path) + "</span>" +
+        '<span class="rq-st">' + (r.status == null ? "—" : r.status) + "</span>" +
+        (r.has_auth ? '<span class="pill warn" title="carries an Authorization/Cookie/token">auth</span>' : "") +
+        (r.scheme === "http" ? '<span class="pill crit">cleartext</span>' : "") +
+        (r.new_host ? '<span class="pill mut">new</span>' : "") +
+        '</div>';
+    }).join("") || '<div class="empty">no requests — start mitmproxy, set the proxy, and drive the app</div>';
+    $$("#rq-list .rq-row").forEach(function (row) {
+      row.addEventListener("click", function () { rqShowDetail(rqRows[+row.dataset.i]); });
+    });
+  }
+  function rqShowDetail(r) {
+    if (!r) return;
+    var hdr = function (h) { return Object.keys(h || {}).map(function (k) {
+      return esc(k) + ": " + esc(String(h[k])); }).join("\n"); };
+    toast(r.method + " " + r.host + r.path, r.scheme === "http" ? "crit" : "",
+          (r.content_type || "") + " · " + (r.resp_bytes || 0) + " B");
+    var out = $("#rq-count");
+    if (out && (r.req_headers || r.resp_headers)) {
+      out.innerHTML = '<pre class="rq-det mono">' + esc("» " + r.method + " " + r.scheme + "://" + r.host + r.path) +
+        "\n" + esc(hdr(r.req_headers)) + "\n\n« " + (r.status || "") + "\n" + esc(hdr(r.resp_headers)) + "</pre>";
+    }
+  }
+  function rqLoadPkgs() {
+    var dl = $("#rq-pkglist");
+    if (!dl || dl.dataset.dev === String(DEV)) return;
+    amGet("/api/appmanager/list?which=user").then(function (d) {
+      dl.innerHTML = (d.apps || []).map(function (a) {
+        return '<option value="' + esc(a.package) + '">' + esc(a.label || a.package) + "</option>";
+      }).join("");
+      dl.dataset.dev = String(DEV);
+    }).catch(function () {});
+  }
+  function loadWatches() {
+    amGet("/api/requests/watches").then(function (d) {
+      $("#rq-watches").innerHTML = (d.watches || []).length
+        ? (d.watches).map(function (w) {
+          return '<div class="rq-watch"><span class="fn">' + esc(w.name) + "</span>" +
+            '<button class="btn danger" data-wd="' + esc(w.id) + '">remove</button></div>';
+        }).join("")
+        : '<div class="empty">no watches — save a filter to get alerted on a match</div>';
+      $$("#rq-watches [data-wd]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          postJSON("/api/requests/watches/delete", { device: DEV, id: b.dataset.wd }).then(loadWatches);
+        });
+      });
+    }).catch(function () {});
+  }
+  (function initRequests() {
+    function on(id, fn, ev) { var e = $("#" + id); if (e) e.addEventListener(ev || "click", fn); }
+    on("rq-refresh", loadRequests);
+    on("rq-pkg", loadRequests, "change");
+    ["rq-host", "rq-path"].forEach(function (id) { on(id, loadRequests, "change"); });
+    ["rq-method", "rq-status", "rq-scheme"].forEach(function (id) { on(id, loadRequests, "change"); });
+    ["rq-auth", "rq-new"].forEach(function (id) { on(id, loadRequests, "change"); });
+    on("rq-watch", function () {
+      var name = prompt("Name this watch (alerts when the current filter matches):", "cleartext");
+      if (!name) return;
+      postJSON("/api/requests/watches", {
+        device: DEV, name: name, package: ($("#rq-pkg").value || "").trim() || null,
+        filter: rqFilters(),
+      }).then(function (r) {
+        if (r.ok === false) { toast(r.output || "could not save", "warn"); return; }
+        toast("watch saved", "good"); loadWatches();
+      }).catch(function () { toast("request failed", "crit"); });
+    });
+    on("rq-export", function () {
+      var fmt = this.value; this.value = "";
+      if (!fmt) return;
+      window.open(rqUrl("/api/requests/export").replace(/\?|$/, function (m) {
+        return (m === "?" ? "?format=" + fmt + "&" : "?format=" + fmt); }), "_blank");
+    }, "change");
+    on("rq-endpoints", function () {
+      var pkg = ($("#rq-pkg").value || "").trim();
+      amGet("/api/requests/endpoints" + (pkg ? "?package=" + encodeURIComponent(pkg) : "")).then(function (d) {
+        $("#rq-list").innerHTML = (d.endpoints || []).length
+          ? (d.endpoints).map(function (e) {
+            return '<div class="rq-row"><span class="pill mut">' + esc((e.method_set || []).join(",")) +
+              '</span><span class="rq-host">' + esc(e.host) + '</span><span class="rq-path">' +
+              esc(e.path) + '</span><span class="rq-st">' + e.count + "×</span></div>";
+          }).join("")
+          : '<div class="empty">no endpoints yet</div>';
+        var c = $("#rq-count"); if (c) c.textContent = (d.endpoints || []).length + " endpoints";
+      }).catch(function () {});
+    });
   })();
 
   /* ================= product polish ================= */

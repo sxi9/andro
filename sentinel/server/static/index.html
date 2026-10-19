@@ -604,8 +604,13 @@
                   <option value="attach">Attach (running)</option>
                 </select></label>
               </div>
-              <div class="ic-row"><button class="btn p" id="fr-unpin">Unpin app</button></div>
+              <div class="ic-row">
+                <button class="btn p" id="fr-unpin">Unpin app</button>
+                <button class="btn danger" id="fr-stop-unpin">Stop unpinning</button>
+                <button class="btn" data-tab-link="console" id="fr-toconsole">Open Console →</button>
+              </div>
               <div id="fr-out" class="ic-out" style="display:none"></div>
+              <p class="ic-help" style="margin-top:8px">After Unpin, <b>open and use the target app</b> so it makes HTTPS calls — each bypass streams to the <b>Console</b> tab live.</p>
             </div>
           </div>
 

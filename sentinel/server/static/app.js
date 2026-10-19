@@ -2939,9 +2939,10 @@
       var box = $("#fr-status");
       if (!box) return;
       box.innerHTML = [
-        pill(s.host_frida ? "good" : "warn", s.host_frida ? "frida on host" : "no frida-tools here"),
+        pill(s.host_frida ? "good" : "warn", s.host_frida ? ("frida on host" + (s.host_version ? " " + esc(s.host_version) : "")) : "no frida-tools here — pip install frida-tools"),
         pill(s.server_running ? "good" : "mut", s.server_running ? "server running" : "server stopped"),
         s.arch ? pill("mut", esc(s.arch)) : "",
+        s.unpinning ? pill("good", "unpinning active — drive the app") : "",
       ].join(" ");
     }).catch(function () {});
   }
@@ -2968,11 +2969,22 @@
         device: DEV, package: pkg, preset: $("#fr-preset").value || "all",
         mode: $("#fr-mode").value || "spawn", confirm: true,
       }).then(function (r) {
-        if (out) out.textContent = (r.bypassed ? "✓ pinning bypassed\n" : (r.ok ? "script loaded\n" : "")) + (r.output || "");
-        toast(r.bypassed ? "pinning bypassed" : (r.ok ? "script loaded" : "failed: " + (r.output || "").split("\n")[0]),
-              r.bypassed ? "good" : (r.ok ? "" : "warn"));
+        if (out) out.textContent = (r.output || "");
+        if (r.ok) {
+          toast("Frida hooks injected — now drive the app; watch the Console", "good",
+                "open the Console tab to see each bypass fire");
+        } else {
+          toast("unpin failed: " + (r.output || "").split("\n")[0], "warn");
+        }
+        loadFridaCard();
       }).catch(function () { if (out) out.textContent = "request failed"; toast("request failed", "crit"); });
     });
+    on("fr-stop-unpin", function () {
+      postJSON("/api/frida/unpin/stop", { device: DEV }).then(function (r) {
+        toast(r.output || "unpinning stopped", "good"); loadFridaCard();
+      }).catch(function () {});
+    });
+    on("fr-toconsole", function () { go("console"); });
   })();
 
   /* ===== mitmproxy ===== */
@@ -3601,7 +3613,7 @@
     }
     // the activity console shows what Sentinel ran on the device + its output
     if (ev.kind === "app.action" || ev.kind === "intercept.action" ||
-        ev.kind === "alert" || ev.kind === "app.backup") {
+        ev.kind === "alert" || ev.kind === "app.backup" || ev.kind === "frida.log") {
       consolePush(ev);
     }
     if (ev.kind === "app.backup" && currentTab === "storage") loadBackups();
@@ -3621,6 +3633,7 @@
   function conGroup(ev) {
     if (ev.kind === "intercept.action") return "intercept";
     if (ev.kind === "app.action") return "app";
+    if (ev.kind === "frida.log") return "frida";
     if (ev.kind === "alert") return "alert";
     return ev.kind.split(".")[0];
   }

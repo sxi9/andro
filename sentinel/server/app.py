@@ -1605,6 +1605,14 @@ def create_app(cfg: Config) -> FastAPI:
             frida_svc.unpin, dctx, package, (body or {}).get("preset", "all"),
             (body or {}).get("mode", "spawn"))
 
+    @app.post("/api/frida/unpin/stop")
+    async def frida_unpin_stop(body: dict | None = None):
+        dctx = _dev((body or {}).get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import frida_svc
+        return await asyncio.to_thread(frida_svc.stop_unpin, dctx)
+
     # ---------- Magisk cert module (offline build) ----------
     @app.post("/api/intercept/ca/module")
     async def intercept_ca_module(body: dict):

@@ -562,6 +562,20 @@
             </div>
           </div>
         </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="ch"><h3>Automation</h3><span class="hint">auto-apply a profile on charger / battery / app · <span id="d-auto-live"></span></span></div>
+          <div class="pad" style="display:flex;flex-direction:column;gap:10px">
+            <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="d-auto-enabled"> Enable automation</label>
+            <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="hint" style="min-width:130px">When charging</span><select id="d-auto-charger" class="auto-prof"></select></span>
+            <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="hint" style="min-width:130px">On battery</span><select id="d-auto-battery" class="auto-prof"></select></span>
+            <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="hint" style="min-width:130px">Battery below</span><input type="number" id="d-auto-lowpct" value="20" style="width:64px"><span class="hint">%</span><select id="d-auto-low" class="auto-prof"></select></span>
+            <div class="hint" style="margin-top:4px">Per-app (foreground → profile):</div>
+            <div id="d-auto-apps"></div>
+            <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><input id="d-auto-app-pkg" class="adbin" list="ic-pkglist" placeholder="com.example.game" style="width:170px"><select id="d-auto-app-prof" class="auto-prof"></select><button class="btn" id="d-auto-app-add">Add app rule</button></span>
+            <span style="display:flex;gap:8px;margin-top:4px"><button class="btn p" id="d-auto-save">Save rules</button><span id="d-auto-out" class="hint"></span></span>
+          </div>
+        </div>
       </section>
 
       <section class="panel" data-panel="alerts">

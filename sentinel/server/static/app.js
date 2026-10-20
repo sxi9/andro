@@ -793,7 +793,27 @@
   renderKernelLog = function (res) { lastKlog = res; _origRenderKernelLog(res); };
 
   /* ---------- device & root tools ---------- */
-  var deviceWired = false;
+  var deviceWired = false, autoApps = [];
+  var AUTO_PROFILES = ["", "powersave", "balanced", "performance", "gaming", "extreme"];
+  function fillProfileSelect(sel, val) {
+    sel.innerHTML = AUTO_PROFILES.map(function (p) {
+      return '<option value="' + p + '"' + (p === (val || "") ? " selected" : "") + ">" + (p || "(none)") + "</option>";
+    }).join("");
+  }
+  function renderAutoApps() {
+    var box = $("#d-auto-apps");
+    if (!box) return;
+    box.innerHTML = autoApps.length ? autoApps.map(function (a, i) {
+      return '<div style="display:flex;align-items:center;gap:8px;margin:3px 0"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+        esc(a.package) + ' <span class="hint">→ ' + esc(a.profile) + "</span></span>" +
+        '<button class="btn sm" data-autodel="' + i + '">✕</button></div>';
+    }).join("") : '<div class="hint">no per-app rules</div>';
+    $$("#d-auto-apps button[data-autodel]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        autoApps.splice(parseInt(b.getAttribute("data-autodel"), 10), 1); renderAutoApps();
+      });
+    });
+  }
   function devPost(url, body) {
     return fetch(dq(url), { method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify(body || {}) }).then(function (r) { return r.json(); });
@@ -871,6 +891,20 @@
       if (d.mode) $("#d-dns-mode").value = d.mode;
       if (d.hostname) $("#d-dns-host").value = d.hostname;
     }).catch(function () {});
+    fetch(dq("/api/device/automation")).then(function (r) { return r.json(); }).then(function (d) {
+      $("#d-auto-enabled").checked = !!d.enabled;
+      fillProfileSelect($("#d-auto-charger"), d.on_charger);
+      fillProfileSelect($("#d-auto-battery"), d.on_battery);
+      fillProfileSelect($("#d-auto-low"), d.low_battery);
+      fillProfileSelect($("#d-auto-app-prof"), "gaming");
+      if (d.low_battery_pct) $("#d-auto-lowpct").value = d.low_battery_pct;
+      autoApps = (d.apps || []).slice(); renderAutoApps();
+      var live = d.live || {}, c = live.context || {};
+      $("#d-auto-live").textContent = live.enabled
+        ? ("now: " + (c.charging ? "charging" : "on battery") + (c.level != null ? " " + c.level + "%" : "") +
+           (live.target ? " → " + live.target : ""))
+        : "off";
+    }).catch(function () {});
     if (deviceWired) return;
     deviceWired = true;
     $("#d-charging").addEventListener("change", function () {
@@ -945,6 +979,24 @@
     $("#d-adblock-adguard").addEventListener("click", function () { adblock("hostname", "dns.adguard-dns.com", "AdGuard DNS"); });
     $("#d-adblock-cloudflare").addEventListener("click", function () { adblock("hostname", "family.cloudflare-dns.com", "Cloudflare Family"); });
     $("#d-adblock-off").addEventListener("click", function () { adblock("off", "", "Private DNS off"); });
+    $("#d-auto-app-add").addEventListener("click", function () {
+      var pkg = ($("#d-auto-app-pkg").value || "").trim(), prof = $("#d-auto-app-prof").value;
+      if (!pkg || !prof) { toast("app and profile required", "warn"); return; }
+      autoApps.push({ package: pkg, profile: prof }); $("#d-auto-app-pkg").value = ""; renderAutoApps();
+    });
+    $("#d-auto-save").addEventListener("click", function () {
+      var cfg = {
+        enabled: $("#d-auto-enabled").checked,
+        on_charger: $("#d-auto-charger").value || null,
+        on_battery: $("#d-auto-battery").value || null,
+        low_battery: $("#d-auto-low").value || null,
+        low_battery_pct: parseInt($("#d-auto-lowpct").value, 10) || 20,
+        apps: autoApps,
+      };
+      devPost("/api/device/automation", { config: cfg }).then(function (r) {
+        $("#d-auto-out").textContent = (r && r.output) || "saved"; toast((r && r.output) || "saved", r && r.ok ? "good" : "warn"); loadDevice();
+      }).catch(function () { $("#d-auto-out").textContent = "failed"; });
+    });
   }
 
   function inspectApp(pkg) {

@@ -19,6 +19,7 @@ log = logging.getLogger("sentinel.devmgr")
 
 
 def collectors_for(dctx: DeviceContext) -> list:
+    from .collectors.automation import AutomationCollector
     from .collectors.capture import CaptureCollector
     from .collectors.logcat import LogcatCollector
     from .collectors.netstats import NetstatsCollector
@@ -33,7 +34,7 @@ def collectors_for(dctx: DeviceContext) -> list:
         LogcatCollector(dctx), SensorsCollector(dctx), NetworkCollector(dctx),
         CaptureCollector(dctx), NetstatsCollector(dctx), PackagesCollector(dctx),
         ThreatsCollector(dctx), RadioCollector(dctx), StorageCollector(dctx),
-        PerfCollector(dctx),
+        PerfCollector(dctx), AutomationCollector(dctx),
     ]
 
 

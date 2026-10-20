@@ -1986,6 +1986,27 @@ def create_app(cfg: Config) -> FastAPI:
         from ..service import roottools
         return await _get(roottools.wakelocks, dctx)
 
+    # ---------- automation ----------
+    @app.get("/api/device/automation")
+    async def device_automation(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"enabled": False, "apps": []}
+        from ..service import automation
+        cfg = await _get(automation.get_config, dctx)
+        ctx = await asyncio.to_thread(automation.evaluate, dctx, False)
+        if isinstance(cfg, dict):
+            cfg["live"] = ctx
+        return cfg
+
+    @app.post("/api/device/automation")
+    async def device_automation_set(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import automation
+        return await asyncio.to_thread(automation.set_config, dctx, body.get("config") or {})
+
     # ---------- diagnostics & benchmarks ----------
     @app.post("/api/device/bench/cpu")
     async def device_bench_cpu(body: dict | None = None):

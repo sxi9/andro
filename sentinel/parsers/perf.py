@@ -78,6 +78,63 @@ def parse_top(text: str, limit: int = 20) -> list[dict]:
     return rows[:limit]
 
 
+def parse_cores(text: str) -> list[dict]:
+    """Lines of 'id|online|cur|min|max|governor' -> per-core dicts (freq in kHz)."""
+    out: list[dict] = []
+    for line in (text or "").splitlines():
+        p = line.strip().split("|")
+        if len(p) < 6 or not p[0].isdigit():
+            continue
+        def _i(v):
+            return int(v) if v.strip().isdigit() else None
+        out.append({
+            "id": int(p[0]),
+            "online": (p[1].strip() != "0"),
+            "cur": _i(p[2]), "min": _i(p[3]), "max": _i(p[4]),
+            "governor": p[5].strip() or None,
+        })
+    out.sort(key=lambda c: c["id"])
+    return out
+
+
+def parse_thermal(text: str) -> list[dict]:
+    """Lines of 'type|millidegrees' -> [{type, temp_c}], skipping junk zones."""
+    out: list[dict] = []
+    for line in (text or "").splitlines():
+        p = line.strip().split("|")
+        if len(p) < 2 or not p[1].strip().lstrip("-").isdigit():
+            continue
+        raw = int(p[1])
+        c = raw / 1000.0 if abs(raw) > 1000 else float(raw)
+        if -40 <= c <= 150 and p[0].strip():
+            out.append({"type": p[0].strip(), "temp_c": round(c, 1)})
+    return out
+
+
+def parse_battery(text: str) -> dict:
+    """`dumpsys battery` -> {level, temp_c, status, health, voltage, plugged}."""
+    out: dict = {}
+    g = lambda k: (re.search(k + r":\s*(-?\d+)", text or "") or [None, None])[1]
+    lvl, temp, volt = g("level"), g("temperature"), g("voltage")
+    if lvl is not None:
+        out["level"] = int(lvl)
+    if temp is not None:
+        out["temp_c"] = round(int(temp) / 10.0, 1)
+    if volt is not None:
+        out["voltage"] = int(volt)
+    st = {"1": "unknown", "2": "charging", "3": "discharging", "4": "not charging", "5": "full"}
+    hl = {"1": "unknown", "2": "good", "3": "overheat", "4": "dead", "5": "over-voltage",
+          "6": "failure", "7": "cold"}
+    s, h = g("status"), g("health")
+    if s in st:
+        out["status"] = st[s]
+    if h in hl:
+        out["health"] = hl[h]
+    pl = re.search(r"AC powered:\s*true", text or "") or re.search(r"USB powered:\s*true", text or "")
+    out["charging"] = bool(pl) or out.get("status") == "charging"
+    return out
+
+
 def parse_cpu_summary(text: str) -> dict:
     """Pull the toybox top header '... %cpu  22%user ... 327%iow ... 133%idle'."""
     out: dict[str, float] = {}

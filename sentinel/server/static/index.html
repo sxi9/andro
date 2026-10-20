@@ -436,14 +436,27 @@
           </div>
         </div>
 
+        <div class="cols" style="margin-top:14px">
+          <div class="card pad0">
+            <div class="ch"><h3>CPU cores</h3><span class="hint">live per-core freq · governor · online</span></div>
+            <div id="p-cores" class="pad"><div class="empty">loading cores…</div></div>
+          </div>
+          <div class="card pad0">
+            <div class="ch"><h3>Temperatures</h3><span class="hint">every thermal sensor · live</span></div>
+            <div id="p-temps" class="pad" style="max-height:460px;overflow:auto"><div class="empty">loading sensors…</div></div>
+          </div>
+        </div>
+
         <div class="card" style="margin-top:14px">
           <div class="ch"><h3>Kernel &amp; device tuning</h3><span class="hint">root · applies live · only shows what this kernel supports</span></div>
           <div class="pad" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding-bottom:0">
             <span class="hint">One-tap profile:</span>
-            <button class="btn" id="p-prof-gaming" title="Most aggressive: CPU+GPU pinned to max, throttling off, no swap — max FPS, runs hot, heavy battery">Gaming / Max</button>
+            <button class="btn danger" id="p-prof-extreme" title="NO LIMITS: everything pinned to max AND thermal throttling disabled — can overheat the device. Use Reset to undo.">Extreme ⚠</button>
+            <button class="btn" id="p-prof-gaming" title="Most aggressive safe: CPU+GPU pinned to max, throttling kept on — max FPS, runs hot, heavy battery">Gaming / Max</button>
             <button class="btn" id="p-prof-performance" title="Max clocks, performance governor, low swappiness — fastest, more battery use">Performance</button>
             <button class="btn" id="p-prof-balanced" title="Stock-balanced governor and clocks">Balanced</button>
             <button class="btn" id="p-prof-powersave" title="Lower clocks, power-save governor, aggressive swap — saves battery">Power saver</button>
+            <button class="btn p" id="p-prof-reset" title="Re-enable thermal throttling and return to Balanced">Reset ↺</button>
             <span id="p-prof-out" class="hint"></span>
           </div>
           <div id="p-tunables" class="pad"><div class="empty">loading tunables…</div></div>

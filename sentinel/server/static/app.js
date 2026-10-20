@@ -613,6 +613,48 @@
       body: JSON.stringify(body || {}),
     }).then(function (r) { return r.json(); });
   }
+  function fmtMHz(khz) {
+    if (!khz) return "—";
+    return khz >= 1000000 ? (khz / 1e6).toFixed(2) + " GHz" : Math.round(khz / 1000) + " MHz";
+  }
+  function tempColor(c) { return c >= 70 ? "#e5484d" : c >= 50 ? "#f5a623" : "#3ecf8e"; }
+  function renderCores(cores) {
+    var box = $("#p-cores"); if (!box) return;
+    if (!cores.length) { box.innerHTML = '<div class="empty">no per-core data</div>'; return; }
+    box.innerHTML = cores.map(function (c) {
+      var pct = (c.cur && c.max) ? Math.round(c.cur / c.max * 100) : 0, off = !c.online;
+      return '<div style="display:flex;align-items:center;gap:8px;margin:5px 0">' +
+        '<span style="min-width:52px">Core ' + c.id + "</span>" +
+        '<div style="flex:1;min-width:60px;background:rgba(128,128,128,.2);border-radius:4px;height:8px;overflow:hidden"><div style="height:100%;width:' + (off ? 0 : pct) + "%;background:" + (off ? "#666" : "#3b82f6") + '"></div></div>' +
+        '<span class="tnum" style="min-width:76px;text-align:right">' + (off ? "offline" : fmtMHz(c.cur)) + "</span>" +
+        '<span class="hint" style="min-width:86px">' + esc(c.governor || "") + "</span>" +
+        (c.id === 0 ? '<span class="hint" style="min-width:52px">on</span>'
+          : '<label class="chk" style="min-width:52px"><input type="checkbox" data-core="' + c.id + '"' + (c.online ? " checked" : "") + "> on</label>") +
+        "</div>";
+    }).join("");
+    $$("#p-cores input[data-core]").forEach(function (cb) {
+      cb.addEventListener("change", function () {
+        perfPost("/api/perf/core", { core: parseInt(cb.getAttribute("data-core"), 10), online: cb.checked })
+          .then(function (r) { if (r && !r.ok) alert(r.output || "failed"); });
+      });
+    });
+  }
+  function renderTemps(thermal, batt) {
+    var box = $("#p-temps"); if (!box) return;
+    var html = "";
+    if (batt && batt.level != null) {
+      html += '<div style="margin-bottom:10px">Battery <b>' + batt.level + "%</b>" +
+        (batt.temp_c != null ? ' · <span style="color:' + tempColor(batt.temp_c) + '">' + batt.temp_c + "°C</span>" : "") +
+        (batt.status ? " · " + esc(batt.status) : "") + (batt.charging ? " ⚡" : "") + "</div>";
+    }
+    if (!thermal.length) { box.innerHTML = html + '<div class="empty">no thermal sensors exposed</div>'; return; }
+    thermal.slice().sort(function (a, b) { return b.temp_c - a.temp_c; }).forEach(function (t) {
+      html += '<div style="display:flex;justify-content:space-between;gap:10px;margin:3px 0">' +
+        '<span class="hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(t.type) + "</span>" +
+        '<span class="tnum" style="color:' + tempColor(t.temp_c) + '">' + t.temp_c + "°C</span></div>";
+    });
+    box.innerHTML = html;
+  }
   function renderPerf(d) {
     d = d || {};
     var m = d.mem || {}, cpu = d.cpu || {};
@@ -624,6 +666,8 @@
     $("#p-iow").textContent = iow != null ? Math.round(iow) + "%" : "—";
     $("#p-iow").style.color = (iow != null && iow > 100) ? "var(--bad,#e5484d)" : "";
     $("#p-load").textContent = (d.loadavg && d.loadavg.length) ? "load " + d.loadavg.join(" ") : "load —";
+    renderCores(d.cores || []);
+    renderTemps(d.thermal || [], d.battery || {});
     var tb = $("#p-proctbl").querySelector("tbody");
     var procs = d.procs || [];
     if (!procs.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">no process data yet…</td></tr>'; return; }
@@ -724,13 +768,16 @@
         loadTunables();
       }).catch(function () { b.disabled = false; });
     });
-    ["gaming", "performance", "balanced", "powersave"].forEach(function (p) {
+    ["extreme", "gaming", "performance", "balanced", "powersave", "reset"].forEach(function (p) {
       var btn = $("#p-prof-" + p);
       if (!btn) return;
       btn.addEventListener("click", function () {
-        if (p !== "balanced" && typeof confirm === "function" &&
-            !confirm("Apply the " + p + " profile? It sets CPU/GPU clocks, governor, I/O and memory knobs at once. Resets on reboot.")) return;
-        var out = $("#p-prof-out"); if (out) out.textContent = "applying " + p + "…";
+        if (typeof confirm === "function") {
+          if (p === "extreme" && !confirm("EXTREME / NO LIMITS\n\nThis pins CPU & GPU to maximum AND DISABLES THERMAL THROTTLING. The device can overheat and may shut down or be damaged. Only run it briefly and watch the temperatures. Use Reset to undo.\n\nContinue?")) return;
+          if (p !== "balanced" && p !== "reset" && p !== "extreme" &&
+              !confirm("Apply the " + p + " profile? It sets CPU/GPU clocks, governor, I/O and memory at once. Resets on reboot.")) return;
+        }
+        var out = $("#p-prof-out"); if (out) out.textContent = (p === "reset" ? "resetting…" : "applying " + p + "…");
         perfPost("/api/perf/profile", { profile: p }).then(function (r) {
           if (out) out.textContent = (r && r.output) || "";
           loadTunables();

@@ -304,6 +304,17 @@ def tunables(dctx) -> dict:
 # Each value is either a priority list (first option the device supports wins) or
 # a freq keyword: "max" | "mid" | "min" (resolved from the device's own freqs).
 _PROFILES = {
+    "extreme": {
+        # same knobs as gaming; apply_profile also disables thermal + brings all
+        # cores online for this profile (see _extreme_extras). DANGEROUS: no
+        # throttling means the SoC can overheat.
+        "cpu_governor": ["performance", "schedutil"],
+        "cpu_max_freq": "max", "cpu_min_freq": "max",
+        "gpu_governor": ["performance", "msm-adreno-tz"],
+        "gpu_max_freq": "max", "gpu_min_freq": "max", "gpu_throttling": "0",
+        "swappiness": "0", "vfs_cache_pressure": "50", "read_ahead_kb": "2048",
+        "io_scheduler": ["mq-deadline", "deadline", "kyber", "none"],
+    },
     "gaming": {
         # most aggressive: pin CPU+GPU to max, disable throttling, minimise swap
         "cpu_governor": ["performance", "schedutil", "interactive"],
@@ -354,9 +365,64 @@ def _resolve_spec(adb, knob: dict, spec) -> str | None:
     return str(spec)
 
 
+def _extreme_extras(adb) -> list[str]:
+    """Disable thermal throttling, bring every core online, kill battery saver.
+    Best-effort and all reversible via thermal_reset()/the 'auto' profile."""
+    did: list[str] = []
+    cmds = [
+        ("for z in /sys/class/thermal/thermal_zone*/mode; do echo disabled > $z 2>/dev/null; done",
+         "thermal zones disabled"),
+        ("for c in /sys/devices/system/cpu/cpu[0-9]*/online; do echo 1 > $c 2>/dev/null; done",
+         "all CPU cores online"),
+        ("settings put global low_power 0", "battery saver off"),
+    ]
+    for cmd, label in cmds:
+        try:
+            adb.shell_sync(cmd, su=True, timeout=15)
+            did.append(label)
+        except AdbError:
+            pass
+    return did
+
+
+def thermal_reset(dctx) -> dict:
+    """Re-enable thermal throttling (undo extreme) and return to the balanced
+    profile — the safety 'Reset' action."""
+    adb = dctx.adb
+    try:
+        adb.shell_sync(
+            "for z in /sys/class/thermal/thermal_zone*/mode; do echo enabled > $z 2>/dev/null; done",
+            su=True, timeout=15)
+    except AdbError:
+        pass
+    res = apply_profile(dctx, "balanced")
+    return {"ok": True, "output": "thermal re-enabled; balanced profile applied",
+            "balanced": res.get("applied", [])}
+
+
+def set_core(dctx, core: int, online: bool) -> dict:
+    """Bring one CPU core online/offline (cpu0 can't go offline)."""
+    try:
+        n = int(core)
+    except (TypeError, ValueError):
+        return {"ok": False, "output": "invalid core"}
+    if n <= 0:
+        return {"ok": False, "output": "cpu0 cannot be taken offline"}
+    try:
+        dctx.adb.shell_sync(
+            f"echo {1 if online else 0} > /sys/devices/system/cpu/cpu{n}/online",
+            su=True, timeout=10)
+        return {"ok": True, "output": f"cpu{n} {'online' if online else 'offline'}"}
+    except AdbError as e:
+        return {"ok": False, "output": str(e)}
+
+
 def apply_profile(dctx, profile: str) -> dict:
-    """Apply a curated batch of tunables for performance / balanced / powersave.
-    Only touches knobs this device actually has; each write is still validated."""
+    """Apply a curated batch of tunables for performance / balanced / powersave /
+    gaming / extreme. Only touches knobs this device actually has; each write is
+    validated. 'extreme' also disables thermal throttling (dangerous)."""
+    if str(profile) in ("auto", "reset"):
+        return thermal_reset(dctx)
     prof = _PROFILES.get(str(profile))
     if not prof:
         return {"ok": False, "output": f"unknown profile: {profile}"}
@@ -374,8 +440,10 @@ def apply_profile(dctx, profile: str) -> dict:
             continue
         r = set_tunable(dctx, key, val)
         (applied if r.get("ok") else skipped).append(key + "=" + val if r.get("ok") else key)
+    if str(profile) == "extreme":
+        applied.extend(_extreme_extras(adb))
     return {"ok": True, "profile": profile, "applied": applied, "skipped": skipped,
-            "output": f"{profile}: applied {len(applied)} knob(s)"
+            "output": f"{profile}: applied {len(applied)} setting(s)"
                       + (f", skipped {len(skipped)}" if skipped else "")}
 
 

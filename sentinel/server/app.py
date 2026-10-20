@@ -1819,6 +1819,15 @@ def create_app(cfg: Config) -> FastAPI:
         from ..service import perf as perfsvc
         return await asyncio.to_thread(perfsvc.apply_profile, dctx, str(body.get("profile", "")))
 
+    @app.post("/api/perf/core")
+    async def perf_core(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import perf as perfsvc
+        return await asyncio.to_thread(
+            perfsvc.set_core, dctx, body.get("core"), bool(body.get("online")))
+
     async def _adbd(body: dict | None, verb: str):
         body = body or {}
         dctx = _dev(body.get("device"))

@@ -304,6 +304,15 @@ def tunables(dctx) -> dict:
 # Each value is either a priority list (first option the device supports wins) or
 # a freq keyword: "max" | "mid" | "min" (resolved from the device's own freqs).
 _PROFILES = {
+    "gaming": {
+        # most aggressive: pin CPU+GPU to max, disable throttling, minimise swap
+        "cpu_governor": ["performance", "schedutil", "interactive"],
+        "cpu_max_freq": "max", "cpu_min_freq": "max",
+        "gpu_governor": ["performance", "msm-adreno-tz"],
+        "gpu_max_freq": "max", "gpu_min_freq": "max", "gpu_throttling": "0",
+        "swappiness": "0", "vfs_cache_pressure": "50", "read_ahead_kb": "512",
+        "io_scheduler": ["mq-deadline", "deadline", "kyber", "none"],
+    },
     "performance": {
         "cpu_governor": ["performance", "schedutil", "interactive"],
         "cpu_max_freq": "max", "cpu_min_freq": "mid",

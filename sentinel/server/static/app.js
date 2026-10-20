@@ -724,7 +724,7 @@
         loadTunables();
       }).catch(function () { b.disabled = false; });
     });
-    ["performance", "balanced", "powersave"].forEach(function (p) {
+    ["gaming", "performance", "balanced", "powersave"].forEach(function (p) {
       var btn = $("#p-prof-" + p);
       if (!btn) return;
       btn.addEventListener("click", function () {

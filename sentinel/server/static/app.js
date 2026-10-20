@@ -30,6 +30,7 @@
     else if (currentTab === "alerts") { loadAlerts(); loadRules(); }
     else if (currentTab === "storage") loadStorage();
     else if (currentTab === "perf") loadPerf();
+    else if (currentTab === "device") loadDevice();
     else if (currentTab === "devices") { loadDevices(); loadRootCard(); }
     else if (currentTab === "logs") renderLogs();
     else if (currentTab === "radio") renderRadioLog();
@@ -62,6 +63,7 @@
     radio: ["Cellular & Radio", "Telephony state, serving cell and the radio log"],
     storage: ["Files & Storage", "Per-app storage, the file browser, and app extraction"],
     perf: ["Performance", "Memory, swap and CPU — what's eating RAM, free it, and tune the kernel"],
+    device: ["Device & Root", "Battery health and charge control, Magisk modules, SELinux, and a per-app firewall"],
     alerts: ["Alerts & Rules", "What tripped, and the detections watching your device"],
     intercept: ["SSL Intercept", "Trust a proxy CA and point the device at it — authorized own-device testing"],
     requests: ["Requests", "Per-app HTTP requests through the proxy, filtered, with watches"],
@@ -82,6 +84,7 @@
     if (tab === "radio") renderRadioLog();
     if (tab === "storage") loadStorage();
     if (tab === "perf") loadPerf();
+    if (tab === "device") loadDevice();
     if (tab === "devices") { loadDevices(); loadRootCard(); }
     if (tab === "appmgr") loadAppManager();
     if (tab === "intercept") loadIntercept();
@@ -788,6 +791,97 @@
   var lastKlog = null;
   var _origRenderKernelLog = renderKernelLog;
   renderKernelLog = function (res) { lastKlog = res; _origRenderKernelLog(res); };
+
+  /* ---------- device & root tools ---------- */
+  var deviceWired = false;
+  function devPost(url, body) {
+    return fetch(dq(url), { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(body || {}) }).then(function (r) { return r.json(); });
+  }
+  function renderBattery(b) {
+    b = b || {};
+    $("#d-bhealth").textContent = b.health_pct != null ? b.health_pct + "%" : "—";
+    $("#d-bcap").textContent = (b.charge_full_uah && b.charge_full_design_uah)
+      ? Math.round(b.charge_full_uah / 1000) + " / " + Math.round(b.charge_full_design_uah / 1000) + " mAh" : "";
+    $("#d-bcycles").textContent = b.cycle_count != null ? b.cycle_count : "—";
+    $("#d-btemp").textContent = b.temp_c != null ? b.temp_c + "°C" : "";
+    $("#d-bnow").textContent = (b.capacity != null ? b.capacity + "%" : "—");
+    $("#d-bstatus").textContent = [b.status, b.current_ma != null ? b.current_ma + " mA" : "", b.voltage_v ? b.voltage_v + " V" : ""].filter(Boolean).join(" · ");
+    var ch = $("#d-charging"); if (ch) ch.checked = !!b.charging_enabled;
+    if (b.charge_limit_pct) { $("#d-limit").value = b.charge_limit_pct; $("#d-limit-v").textContent = b.charge_limit_pct + "%"; }
+    else { $("#d-limit-v").textContent = "off"; }
+    if (b.charge_current_max_ma && !$("#d-current").value) $("#d-current").placeholder = b.charge_current_max_ma + " mA";
+  }
+  function renderModules(mods) {
+    var box = $("#d-modules");
+    if (!mods || !mods.length) { box.innerHTML = '<div class="empty">no Magisk modules</div>'; return; }
+    box.innerHTML = mods.map(function (m) {
+      return '<div style="display:flex;align-items:center;gap:8px;margin:5px 0">' +
+        '<label class="chk"><input type="checkbox" data-mod="' + esc(m.id) + '"' + (m.enabled ? " checked" : "") + "></label>" +
+        '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(m.name || m.id) +
+        ' <span class="hint">' + esc(m.version || "") + "</span></span></div>";
+    }).join("");
+    $$("#d-modules input[data-mod]").forEach(function (cb) {
+      cb.addEventListener("change", function () {
+        devPost("/api/device/module", { id: cb.getAttribute("data-mod"), enabled: cb.checked })
+          .then(function (r) { toast((r && r.output) || "", r && r.ok ? "good" : "warn"); });
+      });
+    });
+  }
+  function renderFwList(blocks) {
+    var box = $("#d-fw-list");
+    if (!blocks || !blocks.length) { box.innerHTML = '<div class="empty">no blocks</div>'; return; }
+    box.innerHTML = blocks.map(function (x) {
+      return '<div style="display:flex;justify-content:space-between;gap:8px;margin:4px 0">' +
+        "<span>uid " + x.uid + "</span><span class='hint'>" +
+        (x.wifi ? "Wi-Fi " : "") + (x.data ? "data" : "") + "</span></div>";
+    }).join("");
+  }
+  function loadDevice() {
+    fetch(dq("/api/device/battery")).then(function (r) { return r.json(); }).then(renderBattery).catch(function () {});
+    fetch(dq("/api/device/modules")).then(function (r) { return r.json(); }).then(function (d) { renderModules(d.modules || []); }).catch(function () {});
+    fetch(dq("/api/firewall")).then(function (r) { return r.json(); }).then(function (d) { renderFwList(d.blocks || []); }).catch(function () {});
+    fetch(dq("/api/device/selinux")).then(function (r) { return r.json(); }).then(function (d) {
+      var c = $("#d-selinux"); if (c) c.checked = (d.mode === "Enforcing"); $("#d-selinux-state").textContent = d.mode || "";
+    }).catch(function () {});
+    fetch(dq("/api/device/persist")).then(function (r) { return r.json(); }).then(function (d) {
+      $("#d-persist-state").textContent = d.persisted ? "saved — applies on boot" : "not saved";
+    }).catch(function () {});
+    if (deviceWired) return;
+    deviceWired = true;
+    $("#d-charging").addEventListener("change", function () {
+      devPost("/api/device/battery/charging", { enabled: this.checked }).then(function (r) { toast((r && r.output) || "", "good"); });
+    });
+    $("#d-limit").addEventListener("input", function () { $("#d-limit-v").textContent = this.value + "%"; });
+    $("#d-limit-set").addEventListener("click", function () {
+      var v = parseInt($("#d-limit").value, 10);
+      devPost("/api/device/battery/limit", { pct: v }).then(function (r) { toast((r && r.output) || "", r && r.ok ? "good" : "warn"); loadDevice(); });
+    });
+    $("#d-current-set").addEventListener("click", function () {
+      devPost("/api/device/battery/current", { ma: parseInt($("#d-current").value, 10) }).then(function (r) { toast((r && r.output) || "", r && r.ok ? "good" : "warn"); });
+    });
+    $("#d-persist").addEventListener("click", function () {
+      var saved = $("#d-persist-state").textContent.indexOf("saved") === 0;
+      devPost("/api/device/persist", { enable: !saved }).then(function (r) { toast((r && r.output) || "", "good"); loadDevice(); });
+    });
+    $("#d-selinux").addEventListener("change", function () {
+      if (!this.checked && !confirm("Set SELinux Permissive? This lowers system security.")) { this.checked = true; return; }
+      devPost("/api/device/selinux", { enforcing: this.checked }).then(function (r) { toast((r && r.output) || "", "good"); });
+    });
+    $("#d-prop-set").addEventListener("click", function () {
+      devPost("/api/device/prop", { key: $("#d-prop-k").value, value: $("#d-prop-v").value }).then(function (r) { toast((r && r.output) || "", r && r.ok ? "good" : "warn"); });
+    });
+    $("#d-fw-set").addEventListener("click", function () {
+      var pkg = ($("#d-fw-pkg").value || "").trim();
+      if (!pkg) { toast("pick an app", "warn"); return; }
+      devPost("/api/firewall/app", { package: pkg, block_wifi: $("#d-fw-wifi").checked, block_data: $("#d-fw-data").checked })
+        .then(function (r) { toast((r && r.output) || "", r && r.ok ? "good" : "warn"); loadDevice(); });
+    });
+    $("#d-fw-clear").addEventListener("click", function () {
+      if (!confirm("Remove all per-app firewall blocks?")) return;
+      devPost("/api/firewall/clear", {}).then(function (r) { toast((r && r.output) || "", "good"); loadDevice(); });
+    });
+  }
 
   function inspectApp(pkg) {
     var card = $("#appstorage-card");

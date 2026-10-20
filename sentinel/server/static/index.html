@@ -33,6 +33,7 @@
       <button data-tab="radio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 15.8a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/><path d="M12 19V9"/></svg>Cellular &amp; Radio</button>
       <button data-tab="storage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2M4 7v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7M8 11h8M8 15h5"/></svg>Files &amp; Storage</button>
       <button data-tab="perf"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/><path d="M12 10V5M3.5 18a9 9 0 1 1 17 0"/><path d="m13.4 11.6 3.1-3.1"/></svg>Performance</button>
+      <button data-tab="device"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 6h2M10 18h4"/></svg>Device &amp; Root</button>
     </nav>
     <div class="navlabel">Defense</div>
     <nav class="nav" data-nav>
@@ -56,6 +57,7 @@
       <button data-tab="radio">Cellular</button>
       <button data-tab="storage">Files</button>
       <button data-tab="perf">Perf</button>
+      <button data-tab="device">Device</button>
       <button data-tab="alerts">Alerts</button>
       <button data-tab="intercept">Intercept</button>
       <button data-tab="requests">Requests</button>
@@ -461,6 +463,57 @@
           </div>
           <div id="p-tunables" class="pad"><div class="empty">loading tunables…</div></div>
           <div class="pad hint" style="padding-top:0">Own-device tuning. Over/under-clock, voltage, I/O, network and display. Changes apply immediately and most reset on reboot. Setting frequencies or voltages too aggressively can make the device unstable.</div>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="device">
+        <div class="grid tiles">
+          <div class="card tile" data-tip="Battery wear = current full-charge capacity vs factory design capacity."><div class="k">Battery health</div><div class="v tnum" id="d-bhealth">—</div><div class="d" id="d-bcap">—</div></div>
+          <div class="card tile"><div class="k">Charge cycles</div><div class="v tnum" id="d-bcycles">—</div><div class="d" id="d-btemp">—</div></div>
+          <div class="card tile"><div class="k">Now</div><div class="v tnum" id="d-bnow">—</div><div class="d" id="d-bstatus">—</div></div>
+          <div class="card tile" data-tip="Persist the current kernel tuning across reboot via a Magisk service.d script."><div class="k">Boot persistence</div><div class="v"><button class="btn" id="d-persist">Save tuning</button></div><div class="d" id="d-persist-state">not saved</div></div>
+        </div>
+
+        <div class="cols" style="margin-top:14px">
+          <div class="card pad0">
+            <div class="ch"><h3>Charge control</h3><span class="hint">protect battery longevity · root</span></div>
+            <div class="pad" style="display:flex;flex-direction:column;gap:10px">
+              <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="d-charging"> Allow charging</label>
+              <span style="display:flex;align-items:center;gap:8px"><span class="hint" style="min-width:120px">Charge limit</span>
+                <input type="range" id="d-limit" min="40" max="100" step="5" value="100" style="width:160px"><b id="d-limit-v">off</b>
+                <button class="btn" id="d-limit-set">Set</button></span>
+              <span style="display:flex;align-items:center;gap:8px"><span class="hint" style="min-width:120px">Charge current cap</span>
+                <input type="number" id="d-current" placeholder="mA" style="width:100px"><button class="btn" id="d-current-set">Set</button></span>
+              <span class="hint">Limit installs a Magisk service.d poller that pauses charging at the set % (persists). Set to off to remove.</span>
+            </div>
+          </div>
+          <div class="card pad0">
+            <div class="ch"><h3>System</h3><span class="hint">root</span></div>
+            <div class="pad" style="display:flex;flex-direction:column;gap:10px">
+              <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="d-selinux"> SELinux Enforcing <span class="hint" id="d-selinux-state"></span></label>
+              <span style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span class="hint" style="min-width:120px">Set property</span>
+                <input id="d-prop-k" placeholder="prop.key" style="width:150px"><input id="d-prop-v" placeholder="value" style="width:120px"><button class="btn" id="d-prop-set">resetprop</button></span>
+              <span class="hint">Property changes apply live via resetprop and revert on reboot.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="cols" style="margin-top:14px">
+          <div class="card pad0">
+            <div class="ch"><h3>Magisk modules</h3><span class="hint">enable / disable · reboot to apply</span></div>
+            <div id="d-modules" class="pad" style="max-height:420px;overflow:auto"><div class="empty">loading modules…</div></div>
+          </div>
+          <div class="card pad0">
+            <div class="ch"><h3>Per-app firewall</h3><span class="hint">block Wi-Fi / mobile data · root</span></div>
+            <div class="logtools" style="gap:6px">
+              <input id="d-fw-pkg" class="adbin" list="ic-pkglist" placeholder="com.example.app" autocomplete="off" spellcheck="false">
+              <label class="chk"><input type="checkbox" id="d-fw-wifi"> Wi-Fi</label>
+              <label class="chk"><input type="checkbox" id="d-fw-data"> data</label>
+              <button class="btn" id="d-fw-set">Block</button>
+              <button class="btn" id="d-fw-clear">Clear all</button>
+            </div>
+            <div id="d-fw-list" class="pad" style="max-height:340px;overflow:auto"><div class="empty">no blocks</div></div>
+          </div>
         </div>
       </section>
 

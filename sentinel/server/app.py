@@ -1828,6 +1828,124 @@ def create_app(cfg: Config) -> FastAPI:
         return await asyncio.to_thread(
             perfsvc.set_core, dctx, body.get("core"), bool(body.get("online")))
 
+    # ---------- root tools: battery, modules, selinux, props, persistence ----------
+    @app.get("/api/device/battery")
+    async def device_battery(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {}
+        from ..service import roottools
+        return await _get(roottools.battery, dctx)
+
+    @app.post("/api/device/battery/charging")
+    async def device_charging(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import roottools
+        return await asyncio.to_thread(roottools.set_charging, dctx, bool(body.get("enabled")))
+
+    @app.post("/api/device/battery/current")
+    async def device_charge_current(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import roottools
+        return await asyncio.to_thread(roottools.set_charge_current, dctx, body.get("ma"))
+
+    @app.post("/api/device/battery/limit")
+    async def device_charge_limit(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import roottools
+        return await asyncio.to_thread(roottools.set_charge_limit, dctx, body.get("pct"))
+
+    @app.get("/api/device/selinux")
+    async def device_selinux(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {}
+        from ..service import roottools
+        return await _get(roottools.selinux_status, dctx)
+
+    @app.post("/api/device/selinux")
+    async def device_selinux_set(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import roottools
+        return await asyncio.to_thread(roottools.set_selinux, dctx, bool(body.get("enforcing")))
+
+    @app.post("/api/device/prop")
+    async def device_prop_set(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import roottools
+        return await asyncio.to_thread(
+            roottools.set_prop, dctx, str(body.get("key", "")), str(body.get("value", "")))
+
+    @app.get("/api/device/modules")
+    async def device_modules(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"modules": []}
+        from ..service import roottools
+        return {"modules": await _get(roottools.modules, dctx)}
+
+    @app.post("/api/device/module")
+    async def device_module_set(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import roottools
+        return await asyncio.to_thread(
+            roottools.set_module, dctx, str(body.get("id", "")), bool(body.get("enabled")))
+
+    @app.get("/api/device/persist")
+    async def device_persist_status(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"persisted": False}
+        from ..service import roottools
+        return await _get(roottools.persist_status, dctx)
+
+    @app.post("/api/device/persist")
+    async def device_persist(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import roottools
+        return await asyncio.to_thread(roottools.persist_tuning, dctx, bool(body.get("enable")))
+
+    # ---------- per-app firewall ----------
+    @app.get("/api/firewall")
+    async def firewall_status(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"blocks": []}
+        from ..service import firewall
+        return await _get(firewall.status, dctx)
+
+    @app.post("/api/firewall/app")
+    async def firewall_app(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import firewall
+        return await asyncio.to_thread(
+            firewall.set_app, dctx, str(body.get("package", "")),
+            bool(body.get("block_wifi")), bool(body.get("block_data")))
+
+    @app.post("/api/firewall/clear")
+    async def firewall_clear(body: dict | None = None):
+        dctx = _dev((body or {}).get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import firewall
+        return await asyncio.to_thread(firewall.clear, dctx)
+
     async def _adbd(body: dict | None, verb: str):
         body = body or {}
         dctx = _dev(body.get("device"))

@@ -1,19 +1,39 @@
 # Android Sentinel
 
-A local, defensive monitoring dashboard for **your own rooted Android device**.
+A local dashboard for **your own rooted Android device** — defensive monitoring
+**and** authorized mobile-app security testing.
 
 Sentinel runs on your PC, talks to the phone over ADB (USB or wireless
-debugging), and shows everything the device is doing in one place: live
-system logs, every network connection and where it lands, microphone /
-camera / location / clipboard access, app and permission changes, the
-cellular radio layer, and an alert engine tuned to the patterns real
-spyware and stalkerware leave behind.
+debugging), and gives you, in one place:
 
-**All data stays on your machine.** There is no cloud, no telemetry, and the
-web UI binds to `127.0.0.1` by default.
+- **Monitoring** — live system logs, every network connection and where it
+  lands, microphone / camera / location / clipboard access, app and permission
+  changes, the cellular radio layer, and an alert engine tuned to spyware /
+  stalkerware patterns.
+- **App Manager** — full inventory (per-user, incl. debloated/hidden), real app
+  names, components with IFW blocking, a tracker/library scanner, manifest and
+  signatures, app-ops, permissions, a shared-prefs editor and SQLite viewer,
+  batch and 1-click operations, install/restore, freeze/suspend/hide, net
+  policy, firewall, and more — host-side parity with AppManager.
+- **SSL interception (Reqable-style, self-contained)** — Sentinel generates and
+  installs **its own CA** (Android-14 APEX-aware), runs its own proxy
+  (mitmproxy) or works with Burp, points the device at it (one click), and shows
+  per-app HTTP requests with filters, saved watches, a **Repeater** and HAR/CSV/
+  JSON export. **Frida pinning-bypass** (live-streaming, all stacks) for apps
+  that pin. A reboot-persistent **Magisk CA module**. An **Engagement** scope
+  gate and a read-only **Activity Console**.
 
-> **Scope**: this is a tool for monitoring a device you own and control.
-> Pointed at someone else's device it is stalkerware. Don't.
+**All data stays on your machine.** No cloud, no telemetry; the web UI binds to
+`127.0.0.1`. Active actions confirm and are audit-logged.
+
+> **Scope**: for a device you own and apps you are authorized to test
+> (bug-bounty in-scope / your own). Pointed at someone else's device or app it
+> is abuse. Don't.
+
+See **[docs/SETUP-AND-USAGE.md](docs/SETUP-AND-USAGE.md)** for the full phone +
+PC setup and the interception workflow, **[CLAUDE.md](CLAUDE.md)** for
+architecture and conventions, and **[docs/ROADMAP.md](docs/ROADMAP.md)** for
+status.
 
 ---
 

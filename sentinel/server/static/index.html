@@ -429,6 +429,7 @@
             <div class="ch"><h3>Kernel log</h3><span class="hint">dmesg · root</span></div>
             <div class="logtools" style="gap:6px">
               <button class="btn" id="p-klog-load">Load kernel log</button>
+              <label class="chk" style="display:inline-flex;align-items:center;gap:4px"><input type="checkbox" id="p-klog-live"> live</label>
               <input id="p-klog-filter" placeholder="filter…" autocomplete="off" spellcheck="false">
             </div>
             <div id="p-klog" class="logbox" style="max-height:400px;overflow:auto;font-family:var(--mono,monospace);font-size:12px;padding:8px"><div class="empty">press Load to read the kernel ring buffer</div></div>
@@ -436,24 +437,9 @@
         </div>
 
         <div class="card" style="margin-top:14px">
-          <div class="ch"><h3>Kernel tuning</h3><span class="hint">root · applies live</span></div>
-          <div class="pad" style="display:flex;flex-wrap:wrap;gap:20px;align-items:center">
-            <label style="display:flex;flex-direction:column;gap:4px">
-              <span class="hint">Swappiness <b id="p-swv">—</b> <span class="hint">(0 = avoid swap, 100 = swap freely)</span></span>
-              <span style="display:flex;gap:8px;align-items:center">
-                <input type="range" id="p-swappiness" min="0" max="200" step="5" style="width:220px">
-                <button class="btn" id="p-swset">Set</button>
-              </span>
-            </label>
-            <label style="display:flex;flex-direction:column;gap:4px">
-              <span class="hint">CPU governor</span>
-              <span style="display:flex;gap:8px;align-items:center">
-                <select id="p-gov"></select>
-                <button class="btn" id="p-govset">Set</button>
-              </span>
-            </label>
-          </div>
-          <div class="pad hint" style="padding-top:0">Own-device tuning. Changes apply immediately and reset on reboot.</div>
+          <div class="ch"><h3>Kernel &amp; device tuning</h3><span class="hint">root · applies live · only shows what this kernel supports</span></div>
+          <div id="p-tunables" class="pad"><div class="empty">loading tunables…</div></div>
+          <div class="pad hint" style="padding-top:0">Own-device tuning. Over/under-clock, voltage, I/O, network and display. Changes apply immediately and most reset on reboot. Setting frequencies or voltages too aggressively can make the device unstable.</div>
         </div>
       </section>
 

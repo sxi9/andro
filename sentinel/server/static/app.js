@@ -70,6 +70,7 @@
   var currentTab = "monitor";
   function go(tab) {
     currentTab = tab;
+    if (tab !== "perf" && typeof perfStopTimers === "function") perfStopTimers();
     $$(".panel").forEach(function (p) { p.classList.toggle("on", p.dataset.panel === tab); });
     $$("[data-nav] button").forEach(function (b) { b.classList.toggle("on", b.dataset.tab === tab); });
     $("#ttl").textContent = titles[tab][0];
@@ -595,7 +596,17 @@
   }
 
   /* ---------- performance / device health ---------- */
-  var perfWired = false;
+  var perfWired = false, perfTimer = null, klogTimer = null;
+  function perfRefresh() {
+    fetch(dq("/api/perf")).then(function (r) { return r.json(); }).then(renderPerf).catch(function () {});
+  }
+  function klogRefresh() {
+    fetch(dq("/api/perf/kernel?lines=500")).then(function (r) { return r.json(); }).then(renderKernelLog).catch(function () {});
+  }
+  function perfStopTimers() {
+    if (perfTimer) { clearInterval(perfTimer); perfTimer = null; }
+    if (klogTimer) { clearInterval(klogTimer); klogTimer = null; }
+  }
   function perfPost(url, body) {
     return fetch(dq(url), {
       method: "POST", headers: { "content-type": "application/json" },
@@ -644,19 +655,41 @@
       }).join("") || '<div class="empty">no lines match the filter</div>';
     box.scrollTop = box.scrollHeight;
   }
+  var RISKY_TK = { cpu_max_freq: 1, cpu_min_freq: 1, gpu_max_freq: 1, gpu_min_freq: 1,
+    uv_table: 1, vdd_levels: 1, gpu_uv: 1, display_size: 1, display_density: 1 };
+  function renderKnob(k) {
+    var id = "tk-" + k.key, ctrl, opts = k.options || [];
+    if ((k.kind === "enum" || k.kind === "freq") && opts.length) {
+      ctrl = '<select id="' + id + '">' + opts.map(function (o) {
+        return "<option" + (String(o) === String(k.value) ? " selected" : "") + ">" + esc(o) + "</option>";
+      }).join("") + "</select>";
+    } else if (k.kind === "int") {
+      ctrl = '<input type="number" id="' + id + '" value="' + esc(k.value) + '"' +
+        (k.min != null ? ' min="' + k.min + '"' : "") + (k.max != null ? ' max="' + k.max + '"' : "") + ' style="width:130px">';
+    } else {
+      ctrl = '<input id="' + id + '" value="' + esc(k.value) + '" style="width:240px">';
+    }
+    return '<div style="display:flex;align-items:center;gap:8px;margin:5px 0;flex-wrap:wrap">' +
+      '<span style="min-width:210px">' + esc(k.label) + (k.unit ? ' <span class="hint">(' + esc(k.unit) + ")</span>" : "") + "</span>" +
+      ctrl + '<button class="btn sm" data-tkset="' + esc(k.key) + '">Set</button></div>';
+  }
+  function renderTunables(data) {
+    var box = $("#p-tunables"), groups = (data && data.groups) || [];
+    if (!groups.length) { box.innerHTML = '<div class="empty">no writable tunables found on this kernel</div>'; return; }
+    box.innerHTML = groups.map(function (g) {
+      return '<div style="margin-bottom:12px"><div class="hint" style="font-weight:600;margin:8px 0 2px;text-transform:uppercase;letter-spacing:.04em">' +
+        esc(g.name) + "</div>" + (g.knobs || []).map(renderKnob).join("") + "</div>";
+    }).join("");
+  }
   function loadTunables() {
-    fetch(dq("/api/perf/tunables")).then(function (r) { return r.json(); }).then(function (t) {
-      if (!t) return;
-      if (t.swappiness != null) { $("#p-swappiness").value = t.swappiness; $("#p-swv").textContent = t.swappiness; }
-      var sel = $("#p-gov");
-      sel.innerHTML = (t.governors || []).map(function (g) {
-        return "<option" + (g === t.governor ? " selected" : "") + ">" + esc(g) + "</option>";
-      }).join("") || "<option>unavailable</option>";
-    }).catch(function () {});
+    fetch(dq("/api/perf/tunables")).then(function (r) { return r.json(); }).then(renderTunables).catch(function () {});
   }
   function loadPerf() {
-    fetch(dq("/api/perf")).then(function (r) { return r.json(); }).then(renderPerf).catch(function () {});
+    perfRefresh();
     loadTunables();
+    // live tiles + process list while the tab is open
+    if (perfTimer) clearInterval(perfTimer);
+    perfTimer = setInterval(perfRefresh, 5000);
     if (perfWired) return;
     perfWired = true;
     $("#p-free").addEventListener("click", function () {
@@ -669,19 +702,27 @@
     });
     $("#p-klog-load").addEventListener("click", function () {
       $("#p-klog").innerHTML = '<div class="empty">reading…</div>';
-      fetch(dq("/api/perf/kernel?lines=500")).then(function (r) { return r.json(); }).then(renderKernelLog).catch(function () {});
+      klogRefresh();
+    });
+    $("#p-klog-live").addEventListener("change", function () {
+      if (klogTimer) { clearInterval(klogTimer); klogTimer = null; }
+      if (this.checked) { klogRefresh(); klogTimer = setInterval(klogRefresh, 3000); }
     });
     $("#p-klog-filter").addEventListener("input", function () {
       if (lastKlog) renderKernelLog(lastKlog);
     });
-    $("#p-swappiness").addEventListener("input", function () { $("#p-swv").textContent = this.value; });
-    $("#p-swset").addEventListener("click", function () {
-      perfPost("/api/perf/tunable", { key: "swappiness", value: $("#p-swappiness").value })
-        .then(function (r) { if (r && !r.ok) alert(r.output || "failed"); loadTunables(); });
-    });
-    $("#p-govset").addEventListener("click", function () {
-      perfPost("/api/perf/tunable", { key: "governor", value: $("#p-gov").value })
-        .then(function (r) { if (r && !r.ok) alert(r.output || "failed"); loadTunables(); });
+    $("#p-tunables").addEventListener("click", function (e) {
+      var b = e.target && e.target.closest ? e.target.closest("[data-tkset]") : null;
+      if (!b) return;
+      var key = b.getAttribute("data-tkset"), inp = $("#tk-" + key);
+      var val = inp ? inp.value : "";
+      if (RISKY_TK[key] && !confirm("Apply " + key + " = " + val + " ?\nFrequency / voltage / resolution changes can make the device unstable until reboot.")) return;
+      b.disabled = true;
+      perfPost("/api/perf/tunable", { key: key, value: val }).then(function (r) {
+        b.disabled = false;
+        if (r && !r.ok) alert(r.output || "failed");
+        loadTunables();
+      }).catch(function () { b.disabled = false; });
     });
   }
   var lastKlog = null;

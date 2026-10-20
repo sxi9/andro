@@ -724,6 +724,19 @@
         loadTunables();
       }).catch(function () { b.disabled = false; });
     });
+    ["performance", "balanced", "powersave"].forEach(function (p) {
+      var btn = $("#p-prof-" + p);
+      if (!btn) return;
+      btn.addEventListener("click", function () {
+        if (p !== "balanced" && typeof confirm === "function" &&
+            !confirm("Apply the " + p + " profile? It sets CPU/GPU clocks, governor, I/O and memory knobs at once. Resets on reboot.")) return;
+        var out = $("#p-prof-out"); if (out) out.textContent = "applying " + p + "…";
+        perfPost("/api/perf/profile", { profile: p }).then(function (r) {
+          if (out) out.textContent = (r && r.output) || "";
+          loadTunables();
+        }).catch(function () { if (out) out.textContent = "failed"; });
+      });
+    });
   }
   var lastKlog = null;
   var _origRenderKernelLog = renderKernelLog;
@@ -2728,6 +2741,7 @@
     icLoadPkgs();           // fill the per-app target datalist from the app list
     loadEngagement();
     loadFridaCard();
+    loadCaptureStatus();
     loadMitmCard();
     loadBuiltinCa();
   }
@@ -3123,7 +3137,34 @@
       }).catch(function () {});
     });
     on("fr-toconsole", function () { go("console"); });
+
+    on("cap-start", function () {
+      var pkg = ($("#cap-pkg").value || "").trim();
+      if (!pkg) { toast("pick an app", "warn"); return; }
+      if (typeof confirm === "function" &&
+          !confirm("Capture " + shortApp(pkg) + "'s requests into the Requests tab?\nOnly on an app you are authorized to test. This restarts the app.")) return;
+      postJSON("/api/frida/capture/start", { device: DEV, package: pkg, mode: "spawn" }).then(function (r) {
+        toast(r.ok ? "capturing — open the Requests tab and use the app" : ("capture failed: " + (r.output || "").split("\n")[0]),
+              r.ok ? "good" : "warn");
+        loadCaptureStatus();
+      }).catch(function () { toast("request failed", "crit"); });
+    });
+    on("cap-stop", function () {
+      postJSON("/api/frida/capture/stop", { device: DEV }).then(function (r) {
+        toast(r.output || "capture stopped", "good"); loadCaptureStatus();
+      }).catch(function () {});
+    });
+    on("cap-toreq", function () { go("requests"); });
   })();
+
+  function loadCaptureStatus() {
+    var el = $("#cap-status");
+    if (!el) return;
+    getJSON(dq("/api/frida/capture/status")).then(function (s) {
+      if (s && s.capturing) { el.className = "pill good"; el.textContent = "capturing " + shortApp(s.package || ""); }
+      else { el.className = "pill mut"; el.textContent = "idle"; }
+    }).catch(function () {});
+  }
 
   /* ===== mitmproxy ===== */
   function loadMitmCard() {

@@ -300,6 +300,76 @@ def tunables(dctx) -> dict:
 
 # ---- tunables (write) -------------------------------------------------------
 
+# ---- one-tap profiles -------------------------------------------------------
+# Each value is either a priority list (first option the device supports wins) or
+# a freq keyword: "max" | "mid" | "min" (resolved from the device's own freqs).
+_PROFILES = {
+    "performance": {
+        "cpu_governor": ["performance", "schedutil", "interactive"],
+        "cpu_max_freq": "max", "cpu_min_freq": "mid",
+        "swappiness": "10", "vfs_cache_pressure": "50", "read_ahead_kb": "512",
+        "io_scheduler": ["mq-deadline", "deadline", "kyber", "none"],
+        "gpu_governor": ["performance", "msm-adreno-tz"], "gpu_max_freq": "max",
+    },
+    "balanced": {
+        "cpu_governor": ["schedutil", "interactive", "ondemand"],
+        "cpu_max_freq": "max", "cpu_min_freq": "min",
+        "swappiness": "60", "vfs_cache_pressure": "100", "read_ahead_kb": "128",
+        "io_scheduler": ["mq-deadline", "deadline", "none"],
+        "gpu_governor": ["msm-adreno-tz", "simple_ondemand", "schedutil"],
+    },
+    "powersave": {
+        "cpu_governor": ["powersave", "schedutil", "conservative"],
+        "cpu_max_freq": "mid", "cpu_min_freq": "min",
+        "swappiness": "100", "vfs_cache_pressure": "120", "read_ahead_kb": "64",
+        "io_scheduler": ["none", "mq-deadline"],
+        "gpu_governor": ["powersave", "msm-adreno-tz"], "gpu_min_freq": "min",
+    },
+}
+
+
+def _resolve_spec(adb, knob: dict, spec) -> str | None:
+    """Turn a profile spec into a concrete value for this device's knob."""
+    if isinstance(spec, list):
+        opts = _options(adb, knob)
+        for s in spec:
+            if not opts or s in opts:
+                return s
+        return None
+    if spec in ("max", "mid", "min"):
+        freqs = sorted(int(x) for x in _options(adb, knob) if x.isdigit())
+        if not freqs:
+            return None
+        return str(freqs[-1] if spec == "max" else freqs[0] if spec == "min"
+                   else freqs[len(freqs) // 2])
+    return str(spec)
+
+
+def apply_profile(dctx, profile: str) -> dict:
+    """Apply a curated batch of tunables for performance / balanced / powersave.
+    Only touches knobs this device actually has; each write is still validated."""
+    prof = _PROFILES.get(str(profile))
+    if not prof:
+        return {"ok": False, "output": f"unknown profile: {profile}"}
+    adb = dctx.adb
+    applied: list[str] = []
+    skipped: list[str] = []
+    for key, spec in prof.items():
+        knob = _BY_KEY.get(key)
+        if not knob or _read_knob(adb, knob) is None:
+            skipped.append(key)
+            continue
+        val = _resolve_spec(adb, knob, spec)
+        if val is None:
+            skipped.append(key)
+            continue
+        r = set_tunable(dctx, key, val)
+        (applied if r.get("ok") else skipped).append(key + "=" + val if r.get("ok") else key)
+    return {"ok": True, "profile": profile, "applied": applied, "skipped": skipped,
+            "output": f"{profile}: applied {len(applied)} knob(s)"
+                      + (f", skipped {len(skipped)}" if skipped else "")}
+
+
 def set_tunable(dctx, key: str, value: str) -> dict:
     """Write one whitelisted knob (root), applying to every matching core/block.
     Display knobs go through `wm`. Everything is validated against the registry

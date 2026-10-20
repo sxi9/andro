@@ -1613,6 +1613,39 @@ def create_app(cfg: Config) -> FastAPI:
         from ..service import frida_svc
         return await asyncio.to_thread(frida_svc.stop_unpin, dctx)
 
+    # ---------- Capture to Requests (no proxy, in-process hook) ----------
+    @app.get("/api/frida/capture/status")
+    async def frida_capture_status(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"capturing": False, "package": None}
+        from ..service import frida_svc
+        return await asyncio.to_thread(frida_svc.capture_status, dctx)
+
+    @app.post("/api/frida/capture/start")
+    async def frida_capture_start(body: dict):
+        package = (body or {}).get("package")
+        if not isinstance(package, str) or not PKG_RE.match(package):
+            return _refuse("invalid package name")
+        dctx = _dev((body or {}).get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import engagement, frida_svc
+        try:
+            engagement.require_scope(hub, pkg=package)
+        except engagement.ScopeError as e:
+            return JSONResponse({"ok": False, "output": str(e)}, status_code=403)
+        return await asyncio.to_thread(
+            frida_svc.start_capture, dctx, package, (body or {}).get("mode", "attach"))
+
+    @app.post("/api/frida/capture/stop")
+    async def frida_capture_stop(body: dict | None = None):
+        dctx = _dev((body or {}).get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import frida_svc
+        return await asyncio.to_thread(frida_svc.stop_capture, dctx)
+
     # ---------- Magisk cert module (offline build) ----------
     @app.post("/api/intercept/ca/module")
     async def intercept_ca_module(body: dict):
@@ -1777,6 +1810,14 @@ def create_app(cfg: Config) -> FastAPI:
         from ..service import perf as perfsvc
         return await asyncio.to_thread(
             perfsvc.set_tunable, dctx, str(body.get("key", "")), str(body.get("value", "")))
+
+    @app.post("/api/perf/profile")
+    async def perf_profile(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import perf as perfsvc
+        return await asyncio.to_thread(perfsvc.apply_profile, dctx, str(body.get("profile", "")))
 
     async def _adbd(body: dict | None, verb: str):
         body = body or {}

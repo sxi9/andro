@@ -438,6 +438,13 @@
 
         <div class="card" style="margin-top:14px">
           <div class="ch"><h3>Kernel &amp; device tuning</h3><span class="hint">root · applies live · only shows what this kernel supports</span></div>
+          <div class="pad" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding-bottom:0">
+            <span class="hint">One-tap profile:</span>
+            <button class="btn" id="p-prof-performance" title="Max clocks, performance governor, low swappiness — fastest, more battery use">Performance</button>
+            <button class="btn" id="p-prof-balanced" title="Stock-balanced governor and clocks">Balanced</button>
+            <button class="btn" id="p-prof-powersave" title="Lower clocks, power-save governor, aggressive swap — saves battery">Power saver</button>
+            <span id="p-prof-out" class="hint"></span>
+          </div>
           <div id="p-tunables" class="pad"><div class="empty">loading tunables…</div></div>
           <div class="pad hint" style="padding-top:0">Own-device tuning. Over/under-clock, voltage, I/O, network and display. Changes apply immediately and most reset on reboot. Setting frequencies or voltages too aggressively can make the device unstable.</div>
         </div>
@@ -648,6 +655,16 @@
               </div>
               <div id="fr-out" class="ic-out" style="display:none"></div>
               <p class="ic-help" style="margin-top:8px">After Unpin, <b>open and use the target app</b> so it makes HTTPS calls — each bypass streams to the <b>Console</b> tab live.</p>
+
+              <div class="ch" style="margin-top:14px"><h3>Capture to Requests (no proxy)</h3><span class="hint">hook the app's own HTTP layer — no CA, app untouched</span></div>
+              <div class="ic-row">
+                <label class="ic-lbl">App<input id="cap-pkg" class="adbin" list="ic-pkglist" placeholder="com.example.app" autocomplete="off" spellcheck="false"></label>
+                <button class="btn p" id="cap-start">Start capture</button>
+                <button class="btn danger" id="cap-stop">Stop</button>
+                <button class="btn" data-tab-link="requests" id="cap-toreq">Open Requests →</button>
+                <span id="cap-status" class="pill mut">idle</span>
+              </div>
+              <p class="ic-help" style="margin-top:8px">Reads the app's requests straight into the <b>Requests</b> tab (Tigon / OkHttp / HttpURLConnection) with no proxy or certificate — works where pinning or QUIC break a proxy. Start restarts the app to catch startup traffic.</p>
             </div>
           </div>
 

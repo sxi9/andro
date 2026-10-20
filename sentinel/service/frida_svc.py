@@ -334,3 +334,157 @@ def unpin(dctx, package: str, preset: str, mode: str) -> dict:
         if "not been found" in str(e).lower() or "ProcessNotFound" in str(e):
             hint = "\nApp not running — use Spawn mode, or open the app first for Attach."
         return {"ok": False, "bypassed": False, "output": msg + hint}
+
+
+# ---------------------------------------------------------------------------
+# Capture to Requests (no proxy): hook the app's own HTTP layer via the frida
+# CLI (its bundled Java bridge works where the in-process binding's does not on
+# frida 17) and feed every request into reqmon, so decrypted requests appear in
+# the Requests tab with no proxy, no CA and the app untouched.
+# ---------------------------------------------------------------------------
+import json as _json
+import os as _os
+import subprocess as _sp
+import sys as _sys
+import tempfile as _tempfile
+from urllib.parse import urlsplit as _urlsplit
+
+_AGENT = _os.path.join(_os.path.dirname(__file__), "capture_agent.js")
+# serial -> {"proc": Popen, "thread": Thread, "package": str, "out": path, "stop": Event}
+_CAPTURES: dict[str, dict] = {}
+
+
+def _frida_cli() -> str | None:
+    """Path to the frida CLI that ships with frida-tools, next to this venv's
+    python, with a PATH fallback."""
+    import shutil
+    exe = "frida.exe" if _os.name == "nt" else "frida"
+    cand = _os.path.join(_os.path.dirname(_sys.executable), exe)
+    if _os.path.exists(cand):
+        return cand
+    return shutil.which("frida")
+
+
+def _ingest_line(dctx, package: str, raw: str) -> None:
+    from . import reqmon
+    i = raw.find("@@REQ@@ ")
+    if i < 0:
+        return
+    try:
+        obj = _json.loads(raw[i + 8:].strip())
+        u = _urlsplit(obj.get("url", ""))
+        path = u.path or "/"
+        if u.query:
+            path += "?" + u.query
+        reqmon.add_flow(dctx, {
+            "package": package,
+            "method": obj.get("method") or "GET",
+            "host": u.hostname or "",
+            "path": path,
+            "scheme": u.scheme or "https",
+            "port": u.port or (443 if (u.scheme or "https") == "https" else 80),
+        })
+    except Exception:  # noqa: BLE001 - one bad line never stops the reader
+        return
+
+
+def _capture_reader(dctx, proc, package: str, out_path: str, stop) -> None:
+    """Tail the frida CLI's output file and push @@REQ@@ lines into reqmon.
+    Reading a file avoids the CLI's block-buffered pipe stdout (which would
+    withhold lines until exit)."""
+    pos = 0
+    while not stop.is_set():
+        try:
+            if _os.path.exists(out_path):
+                with open(out_path, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(pos)
+                    for line in f:
+                        _ingest_line(dctx, package, line)
+                    pos = f.tell()
+        except Exception:  # noqa: BLE001
+            pass
+        if proc.poll() is not None and not stop.is_set():
+            # process ended; one final drain, then stop
+            try:
+                with open(out_path, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(pos)
+                    for line in f:
+                        _ingest_line(dctx, package, line)
+            except Exception:  # noqa: BLE001
+                pass
+            break
+        stop.wait(0.7)
+
+
+def capture_status(dctx) -> dict:
+    serial = getattr(dctx, "serial", "")
+    cap = _CAPTURES.get(serial)
+    running = bool(cap and cap["proc"].poll() is None)
+    return {"capturing": running, "package": cap["package"] if running else None}
+
+
+def stop_capture(dctx) -> dict:
+    serial = getattr(dctx, "serial", "")
+    with _LOCK:
+        cap = _CAPTURES.pop(serial, None)
+    if not cap:
+        return {"ok": True, "output": "no capture running"}
+    try:
+        cap["stop"].set()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        cap["proc"].terminate()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _os.unlink(cap.get("out", ""))
+    except Exception:  # noqa: BLE001
+        pass
+    _emit(dctx, True, "capture stopped", cap["package"])
+    return {"ok": True, "output": "capture stopped"}
+
+
+def start_capture(dctx, package: str, mode: str = "attach") -> dict:
+    """Launch the capture agent against the app via the frida CLI and stream its
+    requests into the Requests tab. attach (default) targets the running app and
+    is reliable; spawn restarts the app to catch startup traffic but can race the
+    Java VM on some devices."""
+    if not _PKG.match(package or ""):
+        return {"ok": False, "output": "invalid package name"}
+    if mode not in _MODES:
+        return {"ok": False, "output": "mode must be spawn or attach"}
+    cli = _frida_cli()
+    if not cli:
+        return {"ok": False, "output": "frida CLI not found. Install it in the venv:\n"
+                                       "  pip install frida-tools"}
+    if not _os.path.exists(_AGENT):
+        return {"ok": False, "output": "capture agent missing"}
+    stop_capture(dctx)   # one capture per device
+    serial = getattr(dctx, "serial", "")
+    out_fd, out_path = _tempfile.mkstemp(prefix="sentinel-cap-", suffix=".log")
+    _os.close(out_fd)
+    # -U and --device are mutually exclusive; use the serial when we have one
+    cmd = [cli, "--device", serial] if serial else [cli, "-U"]
+    if mode == "spawn":
+        cmd += ["-f", package]
+    else:
+        cmd += ["-N", package]   # attach by identifier (package)
+    cmd += ["-l", _AGENT, "-o", out_path]
+    try:
+        # stdin stays an open pipe (never written/closed) so the CLI's REPL
+        # blocks on it and keeps the script loaded; DEVNULL would EOF and exit.
+        proc = _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, stdin=_sp.PIPE,
+                         text=True)
+    except OSError as e:
+        return {"ok": False, "output": f"could not start frida CLI: {e}"}
+    stop = threading.Event()
+    th = threading.Thread(target=_capture_reader, args=(dctx, proc, package, out_path, stop),
+                          daemon=True)
+    th.start()
+    with _LOCK:
+        _CAPTURES[serial] = {"proc": proc, "thread": th, "package": package,
+                             "out": out_path, "stop": stop}
+    _emit(dctx, True, "capture started", package)
+    return {"ok": True, "output": f"capturing {package} into the Requests tab — "
+                                  "open/use the app and watch requests appear."}

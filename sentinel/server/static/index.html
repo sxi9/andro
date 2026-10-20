@@ -535,6 +535,33 @@
             <div id="d-fw-list" class="pad" style="max-height:340px;overflow:auto"><div class="empty">no blocks</div></div>
           </div>
         </div>
+
+        <div class="cols" style="margin-top:14px">
+          <div class="card pad0">
+            <div class="ch"><h3>Benchmarks &amp; FPS</h3><span class="hint">quick device checks</span></div>
+            <div class="pad" style="display:flex;flex-direction:column;gap:10px">
+              <span style="display:flex;gap:8px;flex-wrap:wrap">
+                <button class="btn" id="d-bench-cpu">CPU</button>
+                <button class="btn" id="d-bench-sto">Storage</button>
+                <button class="btn" id="d-fps">FPS (foreground app)</button>
+                <button class="btn" id="d-logs">Capture logs ↓</button>
+              </span>
+              <div id="d-bench-out" class="hint" style="white-space:pre-wrap"></div>
+            </div>
+          </div>
+          <div class="card pad0">
+            <div class="ch"><h3>Ad / tracker blocking</h3><span class="hint">via Private DNS — network-wide, no root</span></div>
+            <div class="pad" style="display:flex;flex-direction:column;gap:8px">
+              <span class="hint">One tap sets Private DNS to a filtering resolver that blocks ads &amp; trackers for the whole device.</span>
+              <span style="display:flex;gap:6px;flex-wrap:wrap">
+                <button class="btn" id="d-adblock-adguard">AdGuard DNS</button>
+                <button class="btn" id="d-adblock-cloudflare">Cloudflare Family</button>
+                <button class="btn" id="d-adblock-off">Off</button>
+              </span>
+              <div id="d-adblock-out" class="hint"></div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="panel" data-panel="alerts">

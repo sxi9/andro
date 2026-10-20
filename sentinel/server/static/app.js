@@ -915,6 +915,36 @@
       devPost("/api/device/dns", { mode: $("#d-dns-mode").value, hostname: $("#d-dns-host").value })
         .then(function (r) { toast((r && r.output) || "", r && r.ok ? "good" : "warn"); });
     });
+    function bench(url, label) {
+      var out = $("#d-bench-out"); out.textContent = label + "… (this takes a few seconds)";
+      devPost(url, {}).then(function (r) { out.textContent = (r && r.output) || "failed"; })
+        .catch(function () { out.textContent = "failed"; });
+    }
+    $("#d-bench-cpu").addEventListener("click", function () { bench("/api/device/bench/cpu", "CPU benchmark"); });
+    $("#d-bench-sto").addEventListener("click", function () { bench("/api/device/bench/storage", "Storage benchmark"); });
+    $("#d-fps").addEventListener("click", function () {
+      var out = $("#d-bench-out"); out.textContent = "reading frame stats…";
+      fetch(dq("/api/device/gfxinfo")).then(function (r) { return r.json(); }).then(function (r) {
+        if (!r || !r.ok) { out.textContent = (r && r.output) || "no frame data"; return; }
+        var p = r.percentiles_ms || {};
+        out.textContent = r.package + "\n" + r.total_frames + " frames · " + r.jank_pct + "% janky\n" +
+          "50th " + (p[50] || "?") + "ms · 90th " + (p[90] || "?") + "ms · 95th " + (p[95] || "?") + "ms · 99th " + (p[99] || "?") + "ms";
+      }).catch(function () { out.textContent = "failed"; });
+    });
+    $("#d-logs").addEventListener("click", function () {
+      $("#d-bench-out").textContent = "capturing logs…";
+      window.location.href = dq("/api/device/logs");
+      setTimeout(function () { $("#d-bench-out").textContent = "log file downloaded"; }, 1500);
+    });
+    function adblock(mode, host, label) {
+      devPost("/api/device/dns", { mode: mode, hostname: host }).then(function (r) {
+        $("#d-adblock-out").textContent = (r && r.ok) ? (label + " — active") : ((r && r.output) || "failed");
+        loadDevice();
+      });
+    }
+    $("#d-adblock-adguard").addEventListener("click", function () { adblock("hostname", "dns.adguard-dns.com", "AdGuard DNS"); });
+    $("#d-adblock-cloudflare").addEventListener("click", function () { adblock("hostname", "family.cloudflare-dns.com", "Cloudflare Family"); });
+    $("#d-adblock-off").addEventListener("click", function () { adblock("off", "", "Private DNS off"); });
   }
 
   function inspectApp(pkg) {

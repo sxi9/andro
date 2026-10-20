@@ -1986,6 +1986,48 @@ def create_app(cfg: Config) -> FastAPI:
         from ..service import roottools
         return await _get(roottools.wakelocks, dctx)
 
+    # ---------- diagnostics & benchmarks ----------
+    @app.post("/api/device/bench/cpu")
+    async def device_bench_cpu(body: dict | None = None):
+        dctx = _dev((body or {}).get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import diagnostics
+        return await asyncio.to_thread(diagnostics.cpu_bench, dctx)
+
+    @app.post("/api/device/bench/storage")
+    async def device_bench_storage(body: dict | None = None):
+        dctx = _dev((body or {}).get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import diagnostics
+        return await asyncio.to_thread(diagnostics.storage_bench, dctx)
+
+    @app.get("/api/device/gfxinfo")
+    async def device_gfxinfo(device: str | None = None, package: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"ok": False, "output": "no device"}
+        from ..service import diagnostics
+        return await _get(diagnostics.gfxinfo, dctx, package)
+
+    @app.get("/api/device/logs")
+    async def device_logs(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return JSONResponse({"error": "no device"}, status_code=400)
+        from ..service import diagnostics
+        res = await asyncio.to_thread(diagnostics.capture_logs, dctx)
+        if not res.get("ok"):
+            return JSONResponse({"error": res.get("output")}, status_code=400)
+        try:
+            with open(res["path"], "rb") as fh:
+                data = fh.read()
+        except OSError as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+        return Response(content=data, media_type="text/plain",
+                        headers={"Content-Disposition": f'attachment; filename="{res["name"]}"'})
+
     # ---------- per-app firewall ----------
     @app.get("/api/firewall")
     async def firewall_status(device: str | None = None):

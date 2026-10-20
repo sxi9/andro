@@ -260,3 +260,149 @@ def persist_status(dctx) -> dict:
     exists = dctx.adb.shell_sync(
         f"[ -f {_TUNING_SH} ] && echo 1 || echo 0", su=True, timeout=8).strip() == "1"
     return {"persisted": exists}
+
+
+# ---------------- display: refresh rate + KCAL color ----------------
+
+def display_info(dctx) -> dict:
+    adb = dctx.adb
+    out: dict = {}
+    try:
+        dd = adb.shell_sync("dumpsys display", timeout=15) or ""
+    except AdbError:
+        dd = ""
+    rates = sorted({int(round(float(m))) for m in re.findall(r"fps=([\d.]+)", dd)}, reverse=True)
+    out["refresh_rates"] = rates
+    act = re.search(r"mActiveSfDisplayMode=.*?refreshRate=([\d.]+)", dd)
+    out["refresh_current"] = int(round(float(act.group(1)))) if act else None
+    # KCAL (colour) — only on kernels that expose it
+    kpath = ""
+    for cand in ("/sys/devices/platform/kcal", "/sys/devices/virtual/graphics/fb0"):
+        if adb.shell_sync(f"[ -e {cand}/kcal ] && echo 1 || echo 0", su=True, timeout=8).strip() == "1":
+            kpath = cand
+            break
+    if kpath:
+        out["kcal"] = {"path": kpath, "rgb": _cat(adb, f"{kpath}/kcal"),
+                       "sat": _cat(adb, f"{kpath}/kcal_sat"), "val": _cat(adb, f"{kpath}/kcal_val")}
+    return out
+
+
+def set_refresh(dctx, hz: int) -> dict:
+    try:
+        h = int(hz)
+    except (TypeError, ValueError):
+        return {"ok": False, "output": "invalid refresh rate"}
+    if not (24 <= h <= 240):
+        return {"ok": False, "output": "refresh rate out of range"}
+    try:
+        dctx.adb.shell_sync(f"settings put system min_refresh_rate {h}.0", timeout=10)
+        dctx.adb.shell_sync(f"settings put system peak_refresh_rate {h}.0", timeout=10)
+        return {"ok": True, "output": f"refresh rate forced to {h} Hz"}
+    except AdbError as e:
+        return {"ok": False, "output": str(e)}
+
+
+# ---------------- ZRAM ----------------
+
+def zram_info(dctx) -> dict:
+    adb = dctx.adb
+    size = _int(_cat(adb, "/sys/block/zram0/disksize"))
+    algo = _cat(adb, "/sys/block/zram0/comp_algorithm")
+    cur = re.search(r"\[(\w+)\]", algo)
+    return {"present": size is not None, "disksize_mb": round(size / 1048576) if size else 0,
+            "algorithms": [a.strip("[]") for a in algo.split()] if algo else [],
+            "algorithm": cur.group(1) if cur else (algo.split()[0] if algo else None)}
+
+
+def set_zram(dctx, size_mb: int, algorithm: str | None = None) -> dict:
+    """Resize ZRAM (swapoff, reset, set size, mkswap, swapon) and optionally set
+    the compression algorithm. Reversible."""
+    adb = dctx.adb
+    try:
+        mb = int(size_mb)
+    except (TypeError, ValueError):
+        return {"ok": False, "output": "invalid size"}
+    if not (0 <= mb <= 8192):
+        return {"ok": False, "output": "size must be 0-8192 MB"}
+    try:
+        adb.shell_sync("swapoff /dev/block/zram0 2>/dev/null || true", su=True, timeout=20)
+        adb.shell_sync("echo 1 > /sys/block/zram0/reset", su=True, timeout=15)
+        if algorithm and re.match(r"^[a-z0-9]{1,16}\Z", algorithm):
+            adb.shell_sync(f"echo {algorithm} > /sys/block/zram0/comp_algorithm 2>/dev/null || true",
+                           su=True, timeout=10)
+        if mb > 0:
+            adb.shell_sync(f"echo {mb * 1048576} > /sys/block/zram0/disksize", su=True, timeout=15)
+            adb.shell_sync("mkswap /dev/block/zram0 2>/dev/null", su=True, timeout=20)
+            adb.shell_sync("swapon /dev/block/zram0 2>/dev/null", su=True, timeout=20)
+        return {"ok": True, "output": f"ZRAM set to {mb} MB" + (f" ({algorithm})" if algorithm else "")}
+    except AdbError as e:
+        return {"ok": False, "output": str(e)}
+
+
+# ---------------- Private DNS ----------------
+
+def dns_status(dctx) -> dict:
+    adb = dctx.adb
+    try:
+        mode = (adb.shell_sync("settings get global private_dns_mode", timeout=8) or "").strip()
+        host = (adb.shell_sync("settings get global private_dns_specifier", timeout=8) or "").strip()
+    except AdbError:
+        mode, host = "", ""
+    return {"mode": None if mode in ("null", "") else mode,
+            "hostname": None if host in ("null", "") else host}
+
+
+def set_dns(dctx, mode: str, hostname: str = "") -> dict:
+    """Private DNS: off | opportunistic | hostname (DNS-over-TLS)."""
+    adb = dctx.adb
+    if mode not in ("off", "opportunistic", "hostname"):
+        return {"ok": False, "output": "mode must be off / opportunistic / hostname"}
+    try:
+        adb.shell_sync(f"settings put global private_dns_mode {mode}", timeout=10)
+        if mode == "hostname":
+            if not re.match(r"^[A-Za-z0-9.-]{3,253}\Z", hostname or ""):
+                return {"ok": False, "output": "invalid DNS hostname"}
+            adb.shell_sync(f"settings put global private_dns_specifier {hostname}", timeout=10)
+        return {"ok": True, "output": "private DNS: " + mode + (f" ({hostname})" if mode == "hostname" else "")}
+    except AdbError as e:
+        return {"ok": False, "output": str(e)}
+
+
+# ---------------- kernel modules + wakelocks ----------------
+
+def kernel_modules(dctx) -> dict:
+    try:
+        out = dctx.adb.shell_sync("lsmod 2>/dev/null", su=True, timeout=12) or ""
+    except AdbError:
+        return {"modules": []}
+    mods = []
+    for line in out.splitlines()[1:]:
+        p = line.split()
+        if len(p) >= 2 and p[1].isdigit():
+            mods.append({"name": p[0], "size": int(p[1]), "used_by": p[3] if len(p) > 3 and p[3] != "-" else ""})
+    mods.sort(key=lambda m: m["size"], reverse=True)
+    return {"modules": mods, "count": len(mods)}
+
+
+def wakelocks(dctx) -> dict:
+    """Top active kernel wakeup sources (best effort — debugfs may be locked)."""
+    adb = dctx.adb
+    txt = ""
+    for path in ("/sys/kernel/debug/wakeup_sources", "/d/wakeup_sources"):
+        txt = _cat(adb, path)
+        if txt:
+            break
+    if not txt:
+        return {"available": False, "wakelocks": []}
+    rows = []
+    lines = txt.splitlines()
+    for line in lines[1:]:
+        p = line.split()
+        if len(p) >= 10 and p[0]:
+            try:
+                rows.append({"name": p[0], "active_count": int(p[1]),
+                             "active_since_ms": int(p[6]) if p[6].isdigit() else 0})
+            except (ValueError, IndexError):
+                continue
+    rows.sort(key=lambda r: r["active_count"], reverse=True)
+    return {"available": True, "wakelocks": rows[:20]}

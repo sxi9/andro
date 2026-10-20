@@ -500,6 +500,26 @@
 
         <div class="cols" style="margin-top:14px">
           <div class="card pad0">
+            <div class="ch"><h3>Display</h3><span class="hint">refresh rate &amp; colour</span></div>
+            <div class="pad" style="display:flex;flex-direction:column;gap:10px">
+              <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="hint" style="min-width:110px">Refresh rate</span><span id="d-refresh-btns" style="display:flex;gap:6px;flex-wrap:wrap"></span></span>
+              <div id="d-kcal" class="hint"></div>
+            </div>
+          </div>
+          <div class="card pad0">
+            <div class="ch"><h3>ZRAM &amp; DNS</h3><span class="hint">compressed swap · private DNS</span></div>
+            <div class="pad" style="display:flex;flex-direction:column;gap:10px">
+              <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="hint" style="min-width:110px">ZRAM size (MB)</span>
+                <input type="number" id="d-zram-mb" style="width:90px"><select id="d-zram-algo" style="width:90px"></select><button class="btn" id="d-zram-set">Set</button></span>
+              <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="hint" style="min-width:110px">Private DNS</span>
+                <select id="d-dns-mode"><option value="off">Off</option><option value="opportunistic">Auto</option><option value="hostname">Hostname</option></select>
+                <input id="d-dns-host" placeholder="dns.google" style="width:120px"><button class="btn" id="d-dns-set">Set</button></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="cols" style="margin-top:14px">
+          <div class="card pad0">
             <div class="ch"><h3>Magisk modules</h3><span class="hint">enable / disable · reboot to apply</span></div>
             <div id="d-modules" class="pad" style="max-height:420px;overflow:auto"><div class="empty">loading modules…</div></div>
           </div>

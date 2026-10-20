@@ -847,6 +847,30 @@
     fetch(dq("/api/device/persist")).then(function (r) { return r.json(); }).then(function (d) {
       $("#d-persist-state").textContent = d.persisted ? "saved — applies on boot" : "not saved";
     }).catch(function () {});
+    fetch(dq("/api/device/display")).then(function (r) { return r.json(); }).then(function (d) {
+      var box = $("#d-refresh-btns");
+      box.innerHTML = (d.refresh_rates || []).map(function (hz) {
+        return '<button class="btn sm" data-hz="' + hz + '"' + (hz === d.refresh_current ? ' style="font-weight:700"' : "") + ">" + hz + " Hz</button>";
+      }).join("") || '<span class="hint">n/a</span>';
+      $$("#d-refresh-btns button[data-hz]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          devPost("/api/device/refresh", { hz: parseInt(b.getAttribute("data-hz"), 10) })
+            .then(function (r) { toast((r && r.output) || "", r && r.ok ? "good" : "warn"); loadDevice(); });
+        });
+      });
+      $("#d-kcal").textContent = d.kcal ? ("KCAL colour: " + (d.kcal.rgb || "")) : "KCAL colour control not exposed by this kernel";
+    }).catch(function () {});
+    fetch(dq("/api/device/zram")).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.disksize_mb != null && !$("#d-zram-mb").value) $("#d-zram-mb").placeholder = d.disksize_mb;
+      var sel = $("#d-zram-algo");
+      sel.innerHTML = (d.algorithms || []).map(function (a) {
+        return "<option" + (a === d.algorithm ? " selected" : "") + ">" + esc(a) + "</option>";
+      }).join("") || "<option>—</option>";
+    }).catch(function () {});
+    fetch(dq("/api/device/dns")).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.mode) $("#d-dns-mode").value = d.mode;
+      if (d.hostname) $("#d-dns-host").value = d.hostname;
+    }).catch(function () {});
     if (deviceWired) return;
     deviceWired = true;
     $("#d-charging").addEventListener("change", function () {
@@ -880,6 +904,16 @@
     $("#d-fw-clear").addEventListener("click", function () {
       if (!confirm("Remove all per-app firewall blocks?")) return;
       devPost("/api/firewall/clear", {}).then(function (r) { toast((r && r.output) || "", "good"); loadDevice(); });
+    });
+    $("#d-zram-set").addEventListener("click", function () {
+      var mb = parseInt($("#d-zram-mb").value, 10);
+      if (isNaN(mb)) { toast("enter a ZRAM size in MB", "warn"); return; }
+      if (!confirm("Resize ZRAM to " + mb + " MB? Swap is briefly turned off during the change.")) return;
+      devPost("/api/device/zram", { mb: mb, algorithm: $("#d-zram-algo").value }).then(function (r) { toast((r && r.output) || "", r && r.ok ? "good" : "warn"); loadDevice(); });
+    });
+    $("#d-dns-set").addEventListener("click", function () {
+      devPost("/api/device/dns", { mode: $("#d-dns-mode").value, hostname: $("#d-dns-host").value })
+        .then(function (r) { toast((r && r.output) || "", r && r.ok ? "good" : "warn"); });
     });
   }
 

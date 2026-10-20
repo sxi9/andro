@@ -1919,6 +1919,73 @@ def create_app(cfg: Config) -> FastAPI:
         from ..service import roottools
         return await asyncio.to_thread(roottools.persist_tuning, dctx, bool(body.get("enable")))
 
+    # ---------- display / zram / dns / kernel modules ----------
+    @app.get("/api/device/display")
+    async def device_display(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {}
+        from ..service import roottools
+        return await _get(roottools.display_info, dctx)
+
+    @app.post("/api/device/refresh")
+    async def device_refresh(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import roottools
+        return await asyncio.to_thread(roottools.set_refresh, dctx, body.get("hz"))
+
+    @app.get("/api/device/zram")
+    async def device_zram(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {}
+        from ..service import roottools
+        return await _get(roottools.zram_info, dctx)
+
+    @app.post("/api/device/zram")
+    async def device_zram_set(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import roottools
+        return await asyncio.to_thread(
+            roottools.set_zram, dctx, body.get("mb"), body.get("algorithm"))
+
+    @app.get("/api/device/dns")
+    async def device_dns(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {}
+        from ..service import roottools
+        return await _get(roottools.dns_status, dctx)
+
+    @app.post("/api/device/dns")
+    async def device_dns_set(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import roottools
+        return await asyncio.to_thread(
+            roottools.set_dns, dctx, str(body.get("mode", "")), str(body.get("hostname", "")))
+
+    @app.get("/api/device/kmodules")
+    async def device_kmodules(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"modules": []}
+        from ..service import roottools
+        return await _get(roottools.kernel_modules, dctx)
+
+    @app.get("/api/device/wakelocks")
+    async def device_wakelocks(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"wakelocks": []}
+        from ..service import roottools
+        return await _get(roottools.wakelocks, dctx)
+
     # ---------- per-app firewall ----------
     @app.get("/api/firewall")
     async def firewall_status(device: str | None = None):

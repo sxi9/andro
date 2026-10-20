@@ -1728,6 +1728,56 @@ def create_app(cfg: Config) -> FastAPI:
         from ..service import rootctl
         return await asyncio.to_thread(rootctl.set_use_su, dctx, enabled)
 
+    # ---------- performance / device health ----------
+    @app.get("/api/perf")
+    def perf(device: str | None = None):
+        dctx = _dev(device)
+        return (dctx.state.get("perf") if dctx else None) or {"mem": {}, "cpu": {}, "procs": []}
+
+    @app.get("/api/perf/kernel")
+    async def perf_kernel(device: str | None = None, lines: int = 400):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"ok": False, "output": "no device", "lines": []}
+        from ..service import perf as perfsvc
+        return await _get(perfsvc.kernel_log, dctx, lines)
+
+    @app.get("/api/perf/tunables")
+    async def perf_tunables(device: str | None = None):
+        dctx = _dev(device)
+        if dctx is None or dctx.adb is None:
+            return {"ok": False, "governors": []}
+        from ..service import perf as perfsvc
+        return await _get(perfsvc.tunables, dctx)
+
+    @app.post("/api/perf/free")
+    async def perf_free(body: dict | None = None):
+        body = body or {}
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import perf as perfsvc
+        return await asyncio.to_thread(perfsvc.free_memory, dctx)
+
+    @app.post("/api/perf/kill")
+    async def perf_kill(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import perf as perfsvc
+        return await asyncio.to_thread(
+            perfsvc.kill_process, dctx,
+            pid=body.get("pid"), package=body.get("package"))
+
+    @app.post("/api/perf/tunable")
+    async def perf_tunable(body: dict):
+        dctx = _dev(body.get("device"))
+        if dctx is None or dctx.adb is None:
+            return _demo_refuse()
+        from ..service import perf as perfsvc
+        return await asyncio.to_thread(
+            perfsvc.set_tunable, dctx, str(body.get("key", "")), str(body.get("value", "")))
+
     async def _adbd(body: dict | None, verb: str):
         body = body or {}
         dctx = _dev(body.get("device"))

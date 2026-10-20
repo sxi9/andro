@@ -29,6 +29,7 @@
     if (currentTab === "apps") loadApps();
     else if (currentTab === "alerts") { loadAlerts(); loadRules(); }
     else if (currentTab === "storage") loadStorage();
+    else if (currentTab === "perf") loadPerf();
     else if (currentTab === "devices") { loadDevices(); loadRootCard(); }
     else if (currentTab === "logs") renderLogs();
     else if (currentTab === "radio") renderRadioLog();
@@ -60,6 +61,7 @@
     logs: ["Logcat", "System log attributed to the owning app"],
     radio: ["Cellular & Radio", "Telephony state, serving cell and the radio log"],
     storage: ["Files & Storage", "Per-app storage, the file browser, and app extraction"],
+    perf: ["Performance", "Memory, swap and CPU — what's eating RAM, free it, and tune the kernel"],
     alerts: ["Alerts & Rules", "What tripped, and the detections watching your device"],
     intercept: ["SSL Intercept", "Trust a proxy CA and point the device at it — authorized own-device testing"],
     requests: ["Requests", "Per-app HTTP requests through the proxy, filtered, with watches"],
@@ -78,6 +80,7 @@
     if (tab === "logs") renderLogs();
     if (tab === "radio") renderRadioLog();
     if (tab === "storage") loadStorage();
+    if (tab === "perf") loadPerf();
     if (tab === "devices") { loadDevices(); loadRootCard(); }
     if (tab === "appmgr") loadAppManager();
     if (tab === "intercept") loadIntercept();
@@ -590,6 +593,100 @@
 
     loadBackups();
   }
+
+  /* ---------- performance / device health ---------- */
+  var perfWired = false;
+  function perfPost(url, body) {
+    return fetch(dq(url), {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }).then(function (r) { return r.json(); });
+  }
+  function renderPerf(d) {
+    d = d || {};
+    var m = d.mem || {}, cpu = d.cpu || {};
+    $("#p-memused").textContent = (m.mem_used_pct != null ? m.mem_used_pct + "%" : "—");
+    $("#p-memavail").textContent = m.mem_available ? fmtBytes(m.mem_available) + " free of " + fmtBytes(m.mem_total) : "";
+    $("#p-swap").textContent = (m.swap_used_pct != null ? m.swap_used_pct + "%" : "—");
+    $("#p-swapd").textContent = m.swap_total ? fmtBytes(m.swap_used) + " / " + fmtBytes(m.swap_total) : "no swap";
+    var iow = cpu.iow != null ? cpu.iow : null;
+    $("#p-iow").textContent = iow != null ? Math.round(iow) + "%" : "—";
+    $("#p-iow").style.color = (iow != null && iow > 100) ? "var(--bad,#e5484d)" : "";
+    $("#p-load").textContent = (d.loadavg && d.loadavg.length) ? "load " + d.loadavg.join(" ") : "load —";
+    var tb = $("#p-proctbl").querySelector("tbody");
+    var procs = d.procs || [];
+    if (!procs.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">no process data yet…</td></tr>'; return; }
+    tb.innerHTML = procs.map(function (p) {
+      return "<tr><td title='pid " + p.pid + "'>" + esc(p.name) + "</td>" +
+        "<td class='tnum'>" + fmtBytes(p.res) + "</td>" +
+        "<td class='tnum'>" + (p.cpu || 0) + "</td>" +
+        "<td><button class='btn sm' data-killpid='" + p.pid + "' data-killname='" + esc(p.name) + "' title='Stop this process'>✕</button></td></tr>";
+    }).join("");
+    $$("#p-proctbl button[data-killpid]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var name = b.getAttribute("data-killname"), pid = b.getAttribute("data-killpid");
+        if (!confirm("Stop " + name + " (pid " + pid + ")? Background apps restart automatically.")) return;
+        var body = /^[a-z0-9_.]+$/i.test(name) && name.indexOf(".") > 0
+          ? { package: name } : { pid: parseInt(pid, 10) };
+        perfPost("/api/perf/kill", body).then(function () { setTimeout(loadPerf, 600); });
+      });
+    });
+  }
+  function renderKernelLog(res) {
+    var box = $("#p-klog");
+    if (!res || res.ok === false) { box.innerHTML = '<div class="empty">' + esc((res && res.output) || "could not read kernel log (root needed)") + "</div>"; return; }
+    var lines = res.lines || [];
+    if (!lines.length) { box.innerHTML = '<div class="empty">kernel log empty</div>'; return; }
+    var f = ($("#p-klog-filter").value || "").toLowerCase();
+    box.innerHTML = lines.filter(function (l) { return !f || l.text.toLowerCase().indexOf(f) >= 0; })
+      .map(function (l) {
+        return "<div style='white-space:pre-wrap;" + (l.warn ? "color:var(--bad,#e5484d)" : "") + "'>" + esc(l.text) + "</div>";
+      }).join("") || '<div class="empty">no lines match the filter</div>';
+    box.scrollTop = box.scrollHeight;
+  }
+  function loadTunables() {
+    fetch(dq("/api/perf/tunables")).then(function (r) { return r.json(); }).then(function (t) {
+      if (!t) return;
+      if (t.swappiness != null) { $("#p-swappiness").value = t.swappiness; $("#p-swv").textContent = t.swappiness; }
+      var sel = $("#p-gov");
+      sel.innerHTML = (t.governors || []).map(function (g) {
+        return "<option" + (g === t.governor ? " selected" : "") + ">" + esc(g) + "</option>";
+      }).join("") || "<option>unavailable</option>";
+    }).catch(function () {});
+  }
+  function loadPerf() {
+    fetch(dq("/api/perf")).then(function (r) { return r.json(); }).then(renderPerf).catch(function () {});
+    loadTunables();
+    if (perfWired) return;
+    perfWired = true;
+    $("#p-free").addEventListener("click", function () {
+      var btn = $("#p-free"); btn.disabled = true; btn.textContent = "Freeing…";
+      perfPost("/api/perf/free", {}).then(function (res) {
+        btn.disabled = false; btn.textContent = "Free memory";
+        if (res && res.ok) $("#p-freed").textContent = "freed " + fmtBytes(Math.max(res.freed || 0, 0));
+        setTimeout(loadPerf, 800);
+      }).catch(function () { btn.disabled = false; btn.textContent = "Free memory"; });
+    });
+    $("#p-klog-load").addEventListener("click", function () {
+      $("#p-klog").innerHTML = '<div class="empty">reading…</div>';
+      fetch(dq("/api/perf/kernel?lines=500")).then(function (r) { return r.json(); }).then(renderKernelLog).catch(function () {});
+    });
+    $("#p-klog-filter").addEventListener("input", function () {
+      if (lastKlog) renderKernelLog(lastKlog);
+    });
+    $("#p-swappiness").addEventListener("input", function () { $("#p-swv").textContent = this.value; });
+    $("#p-swset").addEventListener("click", function () {
+      perfPost("/api/perf/tunable", { key: "swappiness", value: $("#p-swappiness").value })
+        .then(function (r) { if (r && !r.ok) alert(r.output || "failed"); loadTunables(); });
+    });
+    $("#p-govset").addEventListener("click", function () {
+      perfPost("/api/perf/tunable", { key: "governor", value: $("#p-gov").value })
+        .then(function (r) { if (r && !r.ok) alert(r.output || "failed"); loadTunables(); });
+    });
+  }
+  var lastKlog = null;
+  var _origRenderKernelLog = renderKernelLog;
+  renderKernelLog = function (res) { lastKlog = res; _origRenderKernelLog(res); };
 
   function inspectApp(pkg) {
     var card = $("#appstorage-card");

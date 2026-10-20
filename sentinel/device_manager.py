@@ -24,6 +24,7 @@ def collectors_for(dctx: DeviceContext) -> list:
     from .collectors.netstats import NetstatsCollector
     from .collectors.network import NetworkCollector
     from .collectors.packages import PackagesCollector
+    from .collectors.perf import PerfCollector
     from .collectors.radio import RadioCollector
     from .collectors.sensors import SensorsCollector
     from .collectors.storage import StorageCollector
@@ -32,6 +33,7 @@ def collectors_for(dctx: DeviceContext) -> list:
         LogcatCollector(dctx), SensorsCollector(dctx), NetworkCollector(dctx),
         CaptureCollector(dctx), NetstatsCollector(dctx), PackagesCollector(dctx),
         ThreatsCollector(dctx), RadioCollector(dctx), StorageCollector(dctx),
+        PerfCollector(dctx),
     ]
 
 
